@@ -1,0 +1,8 @@
+streamlit
+pillow
+pandas
+openpyxl
+google-generativeai
+SpeechRecognition
+gTTS
+python-docx
