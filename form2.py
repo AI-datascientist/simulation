@@ -142,6 +142,7 @@ def ensure_state_defaults():
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
     ss.setdefault("pending_voice_input", "")
+    ss.setdefault("voice_component_counter", 0)
 
 ensure_state_defaults()
 
@@ -257,46 +258,47 @@ def speak_browser(text: str):
     )
 
 # -----------------------------
-# BROWSER STT WITH HIDDEN INPUT
+# BROWSER STT COMPONENT
 # -----------------------------
 def voice_input_with_button():
     """
-    Voice input that fills a hidden text input and triggers Streamlit rerun.
-    This ensures the transcript is properly captured in Streamlit's state.
+    Voice input component that returns transcript via Streamlit components.
+    Uses a unique key based on counter to avoid key conflicts.
     """
     
-    # Create unique ID for this component instance
-    component_id = f"voice_{st.session_state.session_id}"
+    # Increment counter for unique key
+    st.session_state.voice_component_counter += 1
+    component_key = f"voice_component_{st.session_state.voice_component_counter}"
     
-    voice_html = f"""
+    voice_html = """
     <!DOCTYPE html>
     <html>
     <head>
         <style>
-            body {{
+            body {
                 margin: 0;
                 padding: 20px;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            }}
-            .container {{
+            }
+            .container {
                 max-width: 100%;
                 background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
                 border: 3px solid #10b981;
                 border-radius: 16px;
                 padding: 24px;
                 text-align: center;
-            }}
-            h3 {{
+            }
+            h3 {
                 margin: 0 0 8px 0;
                 color: #065f46;
                 font-size: 20px;
-            }}
-            .subtitle {{
+            }
+            .subtitle {
                 color: #047857;
                 margin-bottom: 20px;
                 font-size: 14px;
-            }}
-            #voiceBtn {{
+            }
+            #voiceBtn {
                 padding: 16px 40px;
                 font-size: 18px;
                 background: #10b981;
@@ -307,26 +309,26 @@ def voice_input_with_button():
                 font-weight: 600;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1);
                 transition: all 0.3s;
-            }}
-            #voiceBtn:hover {{
+            }
+            #voiceBtn:hover {
                 background: #059669;
                 transform: translateY(-2px);
                 box-shadow: 0 6px 8px rgba(0,0,0,0.15);
-            }}
-            #voiceBtn:disabled {{
+            }
+            #voiceBtn:disabled {
                 background: #9ca3af;
                 cursor: not-allowed;
                 transform: none;
-            }}
-            #voiceBtn.recording {{
+            }
+            #voiceBtn.recording {
                 background: #ef4444;
                 animation: pulse 1.5s infinite;
-            }}
-            @keyframes pulse {{
-                0%, 100% {{ opacity: 1; }}
-                50% {{ opacity: 0.7; }}
-            }}
-            .status {{
+            }
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.7; }
+            }
+            .status {
                 margin-top: 16px;
                 padding: 12px;
                 background: white;
@@ -337,8 +339,8 @@ def voice_input_with_button():
                 display: flex;
                 align-items: center;
                 justify-content: center;
-            }}
-            .transcript {{
+            }
+            .transcript {
                 margin-top: 12px;
                 padding: 16px;
                 background: white;
@@ -348,13 +350,13 @@ def voice_input_with_button():
                 text-align: left;
                 font-size: 15px;
                 line-height: 1.6;
-            }}
-            .error {{
+            }
+            .error {
                 color: #dc2626;
-            }}
-            .success {{
+            }
+            .success {
                 color: #059669;
-            }}
+            }
         </style>
     </head>
     <body>
@@ -383,17 +385,17 @@ def voice_input_with_button():
             let finalTranscript = '';
             
             // Check browser support
-            function isSupported() {{
+            function isSupported() {
                 return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
-            }}
+            }
             
-            if (!isSupported()) {{
+            if (!isSupported()) {
                 statusEl.innerHTML = '<span class="error">Speech recognition not supported. Please use Chrome browser.</span>';
                 voiceBtn.disabled = true;
-            }}
+            }
             
             // Initialize recognition
-            function initRecognition() {{
+            function initRecognition() {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 recognition = new SpeechRecognition();
                 
@@ -402,106 +404,106 @@ def voice_input_with_button():
                 recognition.interimResults = true;
                 recognition.maxAlternatives = 1;
                 
-                recognition.onstart = () => {{
+                recognition.onstart = () => {
                     isListening = true;
                     voiceBtn.textContent = 'Listening... Click to stop';
                     voiceBtn.classList.add('recording');
                     statusEl.innerHTML = '<span class="success">🎤 Listening... Speak now!</span>';
                     transcriptEl.textContent = 'Listening...';
-                }};
+                };
                 
-                recognition.onresult = (event) => {{
+                recognition.onresult = (event) => {
                     let interimTranscript = '';
                     finalTranscript = '';
                     
-                    for (let i = 0; i < event.results.length; i++) {{
+                    for (let i = 0; i < event.results.length; i++) {
                         const transcript = event.results[i][0].transcript;
-                        if (event.results[i].isFinal) {{
+                        if (event.results[i].isFinal) {
                             finalTranscript += transcript + ' ';
-                        }} else {{
+                        } else {
                             interimTranscript += transcript;
-                        }}
-                    }}
+                        }
+                    }
                     
-                    if (finalTranscript) {{
+                    if (finalTranscript) {
                         transcriptEl.innerHTML = '<strong>You said:</strong> ' + finalTranscript;
-                    }} else if (interimTranscript) {{
+                    } else if (interimTranscript) {
                         transcriptEl.innerHTML = '<em style="color:#6b7280;">Recognizing:</em> ' + interimTranscript;
-                    }}
-                }};
+                    }
+                };
                 
-                recognition.onend = () => {{
+                recognition.onend = () => {
                     isListening = false;
                     voiceBtn.textContent = 'Start Speaking';
                     voiceBtn.classList.remove('recording');
                     
                     const cleanTranscript = finalTranscript.trim();
                     
-                    if (cleanTranscript && cleanTranscript.length > 0) {{
+                    if (cleanTranscript && cleanTranscript.length > 0) {
                         statusEl.innerHTML = '<span class="success">✓ Sending your message...</span>';
                         transcriptEl.innerHTML = '<strong>Sending:</strong> ' + cleanTranscript;
                         
-                        // Send to Streamlit via postMessage
-                        window.parent.postMessage({{
+                        // Send to Streamlit using setComponentValue
+                        window.parent.postMessage({
                             isStreamlitMessage: true,
                             type: 'streamlit:setComponentValue',
-                            key: '{component_id}',
                             value: cleanTranscript
-                        }}, '*');
+                        }, '*');
                         
-                        // Small delay then reset
-                        setTimeout(() => {{
+                        // Reset after delay
+                        setTimeout(() => {
                             statusEl.innerHTML = 'Message sent! Ready for next recording.';
                             finalTranscript = '';
-                        }}, 1000);
-                    }} else {{
+                        }, 1000);
+                    } else {
                         statusEl.innerHTML = '<span class="error">No speech detected. Please try again.</span>';
                         transcriptEl.textContent = 'Click button to try again...';
-                    }}
-                }};
+                    }
+                };
                 
-                recognition.onerror = (event) => {{
+                recognition.onerror = (event) => {
                     isListening = false;
                     voiceBtn.textContent = 'Start Speaking';
                     voiceBtn.classList.remove('recording');
                     
                     let errorMsg = 'Error: ' + event.error;
-                    if (event.error === 'no-speech') {{
+                    if (event.error === 'no-speech') {
                         errorMsg = 'No speech detected. Please try again and speak clearly.';
-                    }} else if (event.error === 'not-allowed') {{
+                    } else if (event.error === 'not-allowed') {
                         errorMsg = 'Microphone access denied. Please allow microphone in browser settings.';
-                    }} else if (event.error === 'network') {{
+                    } else if (event.error === 'network') {
                         errorMsg = 'Network error. Please check your connection.';
-                    }}
+                    }
                     
                     statusEl.innerHTML = '<span class="error">' + errorMsg + '</span>';
                     transcriptEl.textContent = 'Click button to try again...';
-                }};
-            }}
+                };
+            }
             
             // Button click handler
-            voiceBtn.onclick = () => {{
-                if (!recognition) {{
+            voiceBtn.onclick = () => {
+                if (!recognition) {
                     initRecognition();
-                }}
+                }
                 
-                if (isListening) {{
+                if (isListening) {
                     recognition.stop();
-                }} else {{
+                } else {
                     finalTranscript = '';
-                    try {{
+                    try {
                         recognition.start();
-                    }} catch (e) {{
+                    } catch (e) {
                         statusEl.innerHTML = '<span class="error">Error starting: ' + e.message + '</span>';
-                    }}
-                }}
-            }};
+                    }
+                }
+            };
         </script>
     </body>
     </html>
     """
     
-    result = components.html(voice_html, height=400, key=component_id)
+    # Call component with unique key
+    result = components.html(voice_html, height=400, key=component_key)
     return result
 
 # -----------------------------
@@ -818,7 +820,7 @@ def page_interview():
     else:
         st.info("Click 'Start Speaking' button, allow microphone access, and speak clearly. Your message will be sent automatically.")
         
-        # Voice input component with unique key
+        # Voice input component
         voice_result = voice_input_with_button()
         
         # Process the voice result
