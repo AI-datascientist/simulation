@@ -558,12 +558,18 @@ def page_interview():
             st.rerun()
     else:
         st.caption("Use the browser microphone (Chrome recommended).")
-        transcript = voice_input_browser()
+        # Sadece UI’yi çiz, bir değer bekleme:
+        voice_input_browser()   # <- ÇAĞIR AMA DEĞİŞKENE ATAMA YAPMA
     
-        # Automatic send after speech stops
-        if transcript:
-            handle_turn(transcript)
+        # Otomatik doldurma yerine manuel alan + gönder:
+        recent = st.text_input("Transcript (paste or type here):", key="voice_buf")
+        colv1, colv2 = st.columns([5,1])
+        with colv2:
+            sendv = st.button("Send Voice", type="primary", use_container_width=True)
+        if sendv and recent.strip():
+            handle_turn(recent.strip())
             st.rerun()
+
     
         # Optional manual debug field (can be removed)
         st.text_input("Transcript (auto-filled when ready):", 
@@ -670,6 +676,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
