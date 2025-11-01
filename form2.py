@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 # Psychiatric Interview Simulation — Streamlit (Voice/Text, Talking Avatars, Sidebar Info)
+# Optimized: cached background & avatars, cached heavy resources, persistent mic (no reruns),
+# limited history rendering, shortened sleeps. Everything in English.
 
 import os, re, uuid, json, datetime, time, base64
 from typing import List, Dict, Any, Tuple, Optional
+from io import BytesIO
+from difflib import SequenceMatcher
 
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
-from difflib import SequenceMatcher
-from io import BytesIO
 
 # =============================
 # OPTIONAL DEPS (gracefully degrade)
@@ -34,10 +36,15 @@ except Exception:
     _RECORDER_OK = False
 
 try:
-    import speech_recognition as sr
-    _SR_OK = True
+    import SpeechRecognition as sr  # package name is SpeechRecognition; module is speech_recognition
 except Exception:
-    _SR_OK = False
+    try:
+        import speech_recognition as sr
+        _SR_OK = True
+    except Exception:
+        _SR_OK = False
+else:
+    _SR_OK = True
 
 # =============================
 # CONFIG
@@ -52,6 +59,8 @@ EXCEL_FILE = os.path.join(USER_DIR, "registered_users.xlsx")
 EXCEL_PASSWORD = "admin123"
 DOWNLOAD_PASSWORD = "download456"
 
+MAX_MSG = 30  # render only last N messages to keep UI fast
+
 # Prefer env or secrets; allow UI entry
 _GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", "").strip()
 try:
@@ -60,7 +69,7 @@ except Exception:
     _GOOGLE_API_KEY_SEC = ""
 
 # =============================
-# PAGE SETUP + BACKGROUND
+# PAGE SETUP
 # =============================
 st.set_page_config(
     page_title=APP_TITLE,
@@ -69,37 +78,46 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-def set_background_from_file(path: str):
+# =============================
+# CACHED HELPERS (images, css)
+# =============================
+@st.cache_data(show_spinner=False)
+def load_image_b64(path: str) -> str:
     if not os.path.exists(path):
-        return
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-        b64 = base64.b64encode(data).decode()
-        st.markdown(
-            f"""
-            <style>
-            .stApp {{
-                background-image: url("data:image/jpg;base64,{b64}");
-                background-size: cover;
-                background-position: center;
-                background-repeat: no-repeat;
-                background-attachment: fixed;
-            }}
-            .chat-bubble {{
-                background: rgba(255,255,255,0.92);
-                border-radius: 14px;
-                padding: 12px 14px;
-                border: 1px solid rgba(0,0,0,0.06);
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True
-        )
-    except Exception:
-        pass
+        return ""
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
 
-set_background_from_file("bck.jpg")
+@st.cache_data(show_spinner=False)
+def background_css_from_b64(b64: str) -> str:
+    return f"""
+    <style>
+    .stApp {{
+        background-image: url("data:image/jpg;base64,{b64}");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
+    }}
+    .chat-bubble {{
+        background: rgba(255,255,255,0.92);
+        border-radius: 14px;
+        padding: 12px 14px;
+        border: 1px solid rgba(0,0,0,0.06);
+    }}
+    </style>
+    """
+
+def set_background_from_file(path: str):
+    b64 = load_image_b64(path)
+    if b64:
+        st.markdown(background_css_from_b64(b64), unsafe_allow_html=True)
+
+@st.cache_data(show_spinner=False)
+def load_avatar_b64(path: str) -> str:
+    return load_image_b64(path)
+
+set_background_from_file("bck.webp" if os.path.exists("bck.webp") else "bck.jpg")
 
 # =============================
 # PERSONAS
@@ -110,7 +128,7 @@ MDD_PERSONA = {
     "gender": "Female",
     "dx": "Major Depressive Disorder",
     "current_meds": "Fluoxetine 20–40 mg (day 7 of uptitration)",
-    "photo": "aliye.jpg",
+    "photo": "aliye.webp" if os.path.exists("aliye.webp") else "aliye.jpg",
     "speech_style": "Brief answers, slow, hopeless tone."
 }
 SCZ_PERSONA = {
@@ -119,7 +137,7 @@ SCZ_PERSONA = {
     "gender": "Female",
     "dx": "Schizophrenia, Paranoid Type",
     "current_meds": "LAI Risperidone; previously Haloperidol",
-    "photo": "feride.jpg",
+    "photo": "feride.webp" if os.path.exists("feride.webp") else "feride.jpg",
     "speech_style": "Guarded, may be tangential; paranoid themes."
 }
 
@@ -153,8 +171,7 @@ def ensure_state_defaults():
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
     ss.setdefault("pending_voice_input", "")
-    # 🔒 Stable recorder key so the mic never disappears after re-renders
-    ss.setdefault("recorder_key", f"rec_{uuid.uuid4().hex[:8]}")
+    ss.setdefault("recorder_key", f"rec_{uuid.uuid4().hex[:8]}")  # stable mic key
 
 ensure_state_defaults()
 
@@ -187,17 +204,8 @@ def qa_lookup(user_q: Any, persona_name: str, part: str) -> Optional[str]:
         return best.get("a", "")
     return None
 
-def get_image_base64(image_path: str) -> str:
-    if not os.path.exists(image_path):
-        return ""
-    try:
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    except Exception:
-        return ""
-
 # =============================
-# GEMINI
+# GEMINI (cached heavy resource)
 # =============================
 def get_google_api_key() -> str:
     if _GOOGLE_API_KEY_ENV:
@@ -206,15 +214,13 @@ def get_google_api_key() -> str:
         return _GOOGLE_API_KEY_SEC
     return st.session_state.get("GOOGLE_API_KEY_UI", "").strip()
 
-def init_gemini() -> bool:
+@st.cache_resource(show_spinner=False)
+def get_gemini_model(system_prompt: str):
     api_key = get_google_api_key()
     if not (_GENAI_IMPORT_OK and api_key):
-        return False
-    try:
-        genai.configure(api_key=api_key)
-        return True
-    except Exception:
-        return False
+        return None
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(model_name="gemini-2.0-flash", system_instruction=system_prompt)
 
 def build_system_prompt(persona: Dict, part: str) -> str:
     if persona["name"] == "Aliye Seker":
@@ -232,24 +238,7 @@ def build_system_prompt(persona: Dict, part: str) -> str:
             f"Stay in character and answer in 1–3 short sentences."
         )
 
-def llm_reply(persona: Dict, part: str, user_text: str) -> str:
-    # Try Gemini
-    if init_gemini():
-        try:
-            sys_prompt = build_system_prompt(persona, part)
-            model = genai.GenerativeModel(model_name="gemini-2.0-flash", system_instruction=sys_prompt)
-            r = model.generate_content(user_text)
-            text = (getattr(r, "text", None) or "").strip()
-            text = re.sub(r"\[.*?\]", "", text)
-            if text:
-                return text
-        except Exception:
-            pass
-    # Fallback (no API key or error)
-    return fallback_reply(persona, part, user_text)
-
 def fallback_reply(persona: Dict, part: str, user_text: str) -> str:
-    """Rule-based minimal reply so the app never stays silent."""
     name = persona["name"]
     if name == "Aliye Seker":
         bank_part1 = [
@@ -278,6 +267,20 @@ def fallback_reply(persona: Dict, part: str, user_text: str) -> str:
     idx = abs(hash(user_text)) % len(bank) if user_text else 0
     return bank[idx]
 
+def llm_reply(persona: Dict, part: str, user_text: str) -> str:
+    sys_prompt = build_system_prompt(persona, part)
+    model = get_gemini_model(sys_prompt)
+    if model:
+        try:
+            r = model.generate_content(user_text)
+            text = (getattr(r, "text", None) or "").strip()
+            text = re.sub(r"\[.*?\]", "", text)
+            if text:
+                return text
+        except Exception:
+            pass
+    return fallback_reply(persona, part, user_text)
+
 # =============================
 # BROWSER TTS (SpeechSynthesis)
 # =============================
@@ -298,16 +301,20 @@ def speak_browser(text: str):
     )
 
 # =============================
-# AUDIO → STT
+# SPEECH RECOGNITION (cached recognizer)
 # =============================
+@st.cache_resource(show_spinner=False)
+def get_sr_recognizer():
+    return sr.Recognizer() if _SR_OK else None
+
 def transcribe_wav_bytes(wav_bytes: bytes, language: str = "en-US") -> str:
     if not (_SR_OK and wav_bytes):
         return ""
-    r = sr.Recognizer()
+    r = get_sr_recognizer()
     try:
         with sr.AudioFile(BytesIO(wav_bytes)) as source:
             audio = r.record(source)
-        text = r.recognize_google(audio, language=language)  # no API key required
+        text = r.recognize_google(audio, language=language)  # keyless
         return (text or "").strip()
     except Exception:
         return ""
@@ -335,7 +342,7 @@ def show_avatar(photo_path: str, speaking: bool, placeholder=None):
     if placeholder is None:
         placeholder = st.empty()
     with placeholder.container():
-        st.image(photo_path, width="stretch")
+        st.image(photo_path, use_container_width=True)
         if speaking:
             st.markdown(
                 """
@@ -357,8 +364,8 @@ def show_avatar(photo_path: str, speaking: bool, placeholder=None):
 # =============================
 def persistent_recorder(language: str = "en-US") -> Optional[str]:
     """
-    Keeps the mic button always visible using a stable key.
-    Performs STT on the recorded audio and returns transcript (no rerun here).
+    Always-visible mic with a stable key. Performs STT and returns transcript.
+    NO st.rerun() here; caller should also avoid reruns.
     """
     if not _RECORDER_OK:
         st.error("audio-recorder-streamlit is not available. Add it to requirements.txt or use Text mode.")
@@ -370,9 +377,9 @@ def persistent_recorder(language: str = "en-US") -> Optional[str]:
         st.markdown("#### 🎙️ Press & hold to record")
         audio_bytes = audio_recorder(
             text="🎙️ Press & hold to record",
-            pause_threshold=2.0,
+            pause_threshold=1.2,
             sample_rate=16000,
-            key=st.session_state.recorder_key  # 🔑 stable key
+            key=st.session_state.recorder_key  # stable key
         )
 
     if audio_bytes:
@@ -385,7 +392,7 @@ def persistent_recorder(language: str = "en-US") -> Optional[str]:
     return None
 
 # =============================
-# REGISTRATION
+# REGISTRATION (Excel write is required)
 # =============================
 def save_user_profile(username, data):
     path = os.path.join(USER_DIR, f"{username}.json")
@@ -495,12 +502,13 @@ def page_registration():
             nick = st.text_input("Nickname*")
         with c2:
             email = st.text_input("Email (optional)")
-            photo = st.file_uploader("Upload Your Photo*", type=["jpg","jpeg","png"])
+            photo = st.file_uploader("Upload Your Photo*", type=["jpg","jpeg","png","webp"])
 
         if st.button("Register", type="primary"):
             if first and last and nick and photo:
                 username = nick.lower().replace(" ", "_")
-                photo_path = os.path.join(USER_DIR, f"{username}_photo.jpg")
+                ext = os.path.splitext(photo.name)[1].lower() or ".jpg"
+                photo_path = os.path.join(USER_DIR, f"{username}_photo{ext}")
                 with open(photo_path, "wb") as f:
                     f.write(photo.getbuffer())
                 user_data = {
@@ -536,19 +544,19 @@ def page_menu():
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Aliye Seker — MDD")
-        if os.path.exists("aliye.jpg"):
-            st.image("aliye.jpg", width="stretch")
+        if os.path.exists(MDD_PERSONA["photo"]):
+            st.image(MDD_PERSONA["photo"], use_container_width=True)
         else:
-            st.info("aliye.jpg not found")
+            st.info(f"{MDD_PERSONA['photo']} not found")
         if st.button("Select Aliye Seker"):
             st.session_state.selected_persona = MDD_PERSONA
             st.rerun()
     with c2:
         st.subheader("Feride Deniz — Schizophrenia")
-        if os.path.exists("feride.jpg"):
-            st.image("feride.jpg", width="stretch")
+        if os.path.exists(SCZ_PERSONA["photo"]):
+            st.image(SCZ_PERSONA["photo"], use_container_width=True)
         else:
-            st.info("feride.jpg not found")
+            st.info(f"{SCZ_PERSONA['photo']} not found")
         if st.button("Select Feride Deniz"):
             st.session_state.selected_persona = SCZ_PERSONA
             st.rerun()
@@ -598,14 +606,15 @@ def page_interview():
         unsafe_allow_html=True
     )
 
-    # Conversation
+    # Conversation (render last MAX_MSG)
     st.markdown("### Conversation History")
     patient_photo = persona.get("photo", "")
-    patient_avatar_b64 = get_image_base64(patient_photo)
+    patient_avatar_b64 = load_avatar_b64(patient_photo)
     student_photo = st.session_state.user.get("photo_path", "")
-    student_avatar_b64 = get_image_base64(student_photo)
+    student_avatar_b64 = load_avatar_b64(student_photo)
 
-    for role, msg, ts, source in st.session_state.conversation:
+    history = st.session_state.conversation[-MAX_MSG:]
+    for role, msg, ts, source in history:
         if role == "Student":
             col1, col2 = st.columns([1, 9])
             with col1:
@@ -664,14 +673,14 @@ def page_interview():
             send = st.button("Send", type="primary")
         if send and (user_text or "").strip():
             handle_turn(user_text.strip())
-            st.rerun()  # rerun is OK for Text mode
+            st.rerun()  # rerun OK for Text
     else:
         st.info("Press & hold the mic to record. Release to stop. The transcript will be sent automatically.")
-        # 🔁 Always visible mic with a stable key. NO rerun here.
-        transcript = persistent_recorder(language="en-US")  # or "tr-TR"
+        # Persistent mic (no rerun)
+        transcript = persistent_recorder(language="en-US")  # change to "tr-TR" if needed
         if transcript and transcript != st.session_state.get("pending_voice_input", ""):
             st.session_state.pending_voice_input = transcript
-            handle_turn(transcript)   # ⛔ NO st.rerun() in voice branch
+            handle_turn(transcript)   # no st.rerun()
 
     st.markdown("---")
     c1, c2 = st.columns(2)
@@ -694,19 +703,21 @@ def handle_turn(user_input: str):
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
 
-    time.sleep(0.25)
+    # shorter delay for UX feel
+    # time.sleep(0.05)
 
-    ans = qa_lookup(user_input, persona["name"], part)
-    source = "db" if ans else "ai"
-    if not ans:
-        ans = llm_reply(persona, part, user_input)
+    ans_db = qa_lookup(user_input, persona["name"], part)
+    if ans_db:
+        ans, source = ans_db, "db"
+    else:
+        ans, source = llm_reply(persona, part, user_input), "ai"
 
     if os.path.exists(photo):
         show_avatar(photo, speaking=True, placeholder=st.session_state.avatar_placeholder)
 
     if st.session_state.enable_tts:
         speak_browser(ans)
-        time.sleep(0.8)
+        # time.sleep(0.2)
 
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
