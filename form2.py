@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 # Psychiatric Interview Simulation — Streamlit (Voice/Text, Talking Avatars, Sidebar Info)
-# HF Spaces/Streamlit Cloud friendly. No unsupported browser-speech packages.
-# Files expected (optional): aliye.jpg, feride.jpg, bck.jpg
-# GOOGLE_API_KEY is read from st.secrets["GOOGLE_API_KEY"] or env GOOGLE_API_KEY; UI fallback exists.
 
 import os, re, uuid, json, datetime, time, base64
 from typing import List, Dict, Any, Tuple, Optional
@@ -138,13 +135,13 @@ def ensure_state_defaults():
     ss.setdefault("selected_persona", None)
     ss.setdefault("selected_part", None)
     ss.setdefault("session_id", None)
-    ss.setdefault("conversation", [])  # list of (role, text, ts, source)
+    ss.setdefault("conversation", [])
     ss.setdefault("awaiting_permission", False)
     ss.setdefault("avatar_placeholder", None)
     ss.setdefault("enable_tts", True)
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
-    ss.setdefault("voice_transcript_buffer", "")
+    ss.setdefault("voice_active", False)
 
 ensure_state_defaults()
 
@@ -231,7 +228,7 @@ def llm_reply(persona: Dict, part: str, user_text: str) -> str:
         model = genai.GenerativeModel(model_name="gemini-2.0-flash-exp", system_instruction=sys_prompt)
         r = model.generate_content(user_text)
         text = (getattr(r, "text", None) or "").strip()
-        text = re.sub(r"\[.*?\]", "", text)  # remove bracketed meta
+        text = re.sub(r"\[.*?\]", "", text)
         return text or "I'm not sure how to answer that."
     except Exception:
         return "I'm having trouble responding right now."
@@ -260,134 +257,139 @@ def speak_browser(text: str):
     )
 
 # -----------------------------
-# BROWSER STT (IMPROVED UI)
+# BROWSER STT (AUTO-SUBMIT)
 # -----------------------------
-def voice_input_browser_ui():
+def voice_input_auto():
     """
-    Improved Web Speech UI with better instructions and visual feedback.
-    User speaks, copies transcript, and pastes into text input below.
+    Automatic voice input using Web Speech API.
+    When user finishes speaking, automatically sends the transcript via query params.
     """
-    html = """
-    <div style="padding:16px;border:2px solid #3b82f6;border-radius:12px;background:#eff6ff;">
-      <div style="margin-bottom:12px;">
-        <h4 style="margin:0 0 8px 0;color:#1e40af;">Voice Recording Instructions:</h4>
-        <ol style="margin:0;padding-left:20px;color:#1e3a8a;line-height:1.6;">
-          <li>Click <strong>Start Recording</strong> button</li>
-          <li>Allow microphone access if prompted by browser</li>
-          <li>Speak your question clearly</li>
-          <li>Click <strong>Stop Recording</strong> when done</li>
-          <li>Copy the transcript text that appears below</li>
-          <li>Paste it into the text box and click <strong>Send Voice</strong></li>
-        </ol>
-      </div>
-      
-      <div style="text-align:center;margin-bottom:12px;">
-        <button id="startBtn" style="padding:10px 24px;font-size:16px;background:#10b981;color:white;border:none;border-radius:8px;cursor:pointer;margin-right:8px;">
-          Start Recording
+    
+    # Generate unique session ID for this voice session
+    if "voice_session_id" not in st.session_state:
+        st.session_state.voice_session_id = str(uuid.uuid4())[:8]
+    
+    voice_html = f"""
+    <div style="padding:20px;border:3px solid #10b981;border-radius:16px;background:linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);text-align:center;">
+        <div style="margin-bottom:16px;">
+            <h3 style="margin:0 0 8px 0;color:#065f46;">Voice Input (Automatic)</h3>
+            <p style="margin:0;color:#047857;font-size:14px;">Click the button and speak. Your speech will be sent automatically.</p>
+        </div>
+        
+        <button id="voiceBtn" style="padding:16px 32px;font-size:18px;background:#10b981;color:white;border:none;border-radius:12px;cursor:pointer;font-weight:600;box-shadow:0 4px 6px rgba(0,0,0,0.1);transition:all 0.3s;">
+            Start Speaking
         </button>
-        <button id="stopBtn" disabled style="padding:10px 24px;font-size:16px;background:#ef4444;color:white;border:none;border-radius:8px;cursor:pointer;">
-          Stop Recording
-        </button>
-      </div>
-      
-      <div style="text-align:center;margin-bottom:12px;">
-        <span id="status" style="padding:8px 16px;background:#fff;border-radius:8px;color:#1e40af;font-weight:600;display:inline-block;">Ready to record</span>
-      </div>
-      
-      <div style="background:#fff;border:2px solid #3b82f6;border-radius:8px;padding:12px;min-height:60px;">
-        <div style="color:#64748b;font-size:13px;margin-bottom:4px;">Transcript (copy this text):</div>
-        <div id="out" style="font-weight:600;color:#1e40af;font-size:15px;min-height:40px;"></div>
-      </div>
+        
+        <div id="status" style="margin-top:16px;padding:12px;background:white;border-radius:8px;color:#065f46;font-weight:600;min-height:50px;display:flex;align-items:center;justify-content:center;">
+            Click button to start
+        </div>
+        
+        <div id="transcript" style="margin-top:12px;padding:12px;background:white;border-radius:8px;color:#1e40af;min-height:60px;text-align:left;font-size:15px;"></div>
     </div>
     
     <script>
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn  = document.getElementById('stopBtn');
+    const voiceBtn = document.getElementById('voiceBtn');
     const statusEl = document.getElementById('status');
-    const outEl    = document.getElementById('out');
-    let rec=null; 
-    let finalText = "";
-
-    function isSupported(){
-      return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
-    }
-
-    function createRec(){
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const r = new SR();
-      r.lang = 'en-US';
-      r.interimResults = true;
-      r.continuous = false;
-      r.maxAlternatives = 1;
-      
-      r.onstart = ()=>{ 
-        statusEl.textContent='Recording... Speak now';
-        statusEl.style.background='#fef3c7';
-        statusEl.style.color='#92400e';
-      };
-      
-      r.onresult = (e)=>{
-        let t = "";
-        for (let i=0; i<e.results.length; i++){ 
-          t += e.results[i][0].transcript; 
-        }
-        outEl.textContent = t;
-        finalText = t;
-      };
-      
-      r.onend = ()=>{ 
-        statusEl.textContent='Recording stopped. Copy the transcript above.';
-        statusEl.style.background='#dcfce7';
-        statusEl.style.color='#166534';
-        startBtn.disabled=false; 
-        stopBtn.disabled=true; 
-      };
-      
-      r.onerror = (e)=>{ 
-        statusEl.textContent='Error: ' + e.error + ' (Check browser permissions)';
-        statusEl.style.background='#fee2e2';
-        statusEl.style.color='#991b1b';
-        startBtn.disabled=false; 
-        stopBtn.disabled=true; 
-      };
-      
-      return r;
-    }
-
-    if(!isSupported()){
-      statusEl.textContent = 'Browser Speech Recognition not supported. Please use Chrome.';
-      statusEl.style.background='#fee2e2';
-      statusEl.style.color='#991b1b';
-      startBtn.disabled = true;
-    }
-
-    startBtn.onclick = ()=>{
-      finalText = ""; 
-      outEl.textContent = "";
-      if(!rec) rec = createRec();
-      startBtn.disabled = true; 
-      stopBtn.disabled = false;
-      try {
-        rec.start();
-      } catch(e) {
-        statusEl.textContent = 'Error starting: ' + e.message;
-        statusEl.style.background='#fee2e2';
-        statusEl.style.color='#991b1b';
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-      }
-    };
+    const transcriptEl = document.getElementById('transcript');
     
-    stopBtn.onclick = ()=>{
-      if(rec) {
-        try {
-          rec.stop();
-        } catch(e) {}
-      }
-    };
+    let recognition = null;
+    let isListening = false;
+    
+    function isSupported() {{
+        return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+    }}
+    
+    if (!isSupported()) {{
+        statusEl.innerHTML = '<span style="color:#dc2626;">Browser does not support speech recognition. Please use Chrome.</span>';
+        voiceBtn.disabled = true;
+        voiceBtn.style.background = '#9ca3af';
+    }}
+    
+    function initRecognition() {{
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        recognition.lang = 'en-US';
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+        
+        recognition.onstart = () => {{
+            isListening = true;
+            statusEl.innerHTML = '<span style="color:#059669;">Listening... Speak now!</span>';
+            voiceBtn.textContent = 'Listening...';
+            voiceBtn.style.background = '#ef4444';
+            transcriptEl.textContent = '';
+        }};
+        
+        recognition.onresult = (event) => {{
+            let interimTranscript = '';
+            let finalTranscript = '';
+            
+            for (let i = 0; i < event.results.length; i++) {{
+                const transcript = event.results[i][0].transcript;
+                if (event.results[i].isFinal) {{
+                    finalTranscript += transcript + ' ';
+                }} else {{
+                    interimTranscript += transcript;
+                }}
+            }}
+            
+            if (finalTranscript) {{
+                transcriptEl.innerHTML = '<strong>Final:</strong> ' + finalTranscript;
+            }} else {{
+                transcriptEl.innerHTML = '<em style="color:#6b7280;">Interim:</em> ' + interimTranscript;
+            }}
+        }};
+        
+        recognition.onend = () => {{
+            isListening = false;
+            const finalText = transcriptEl.textContent.replace('Final: ', '').trim();
+            
+            if (finalText && finalText.length > 0) {{
+                statusEl.innerHTML = '<span style="color:#059669;">Processing... Sending your message</span>';
+                
+                // Send to Streamlit via query params
+                const currentUrl = window.location.href.split('?')[0];
+                const newUrl = currentUrl + '?voice_input=' + encodeURIComponent(finalText) + '&ts=' + Date.now();
+                window.location.href = newUrl;
+            }} else {{
+                statusEl.innerHTML = '<span style="color:#dc2626;">No speech detected. Please try again.</span>';
+                voiceBtn.textContent = 'Start Speaking';
+                voiceBtn.style.background = '#10b981';
+            }}
+        }};
+        
+        recognition.onerror = (event) => {{
+            isListening = false;
+            statusEl.innerHTML = '<span style="color:#dc2626;">Error: ' + event.error + '</span>';
+            voiceBtn.textContent = 'Start Speaking';
+            voiceBtn.style.background = '#10b981';
+            
+            if (event.error === 'no-speech') {{
+                statusEl.innerHTML = '<span style="color:#dc2626;">No speech detected. Click and speak again.</span>';
+            }}
+        }};
+    }}
+    
+    voiceBtn.onclick = () => {{
+        if (!recognition) {{
+            initRecognition();
+        }}
+        
+        if (isListening) {{
+            recognition.stop();
+        }} else {{
+            try {{
+                recognition.start();
+            }} catch(e) {{
+                statusEl.innerHTML = '<span style="color:#dc2626;">Error: ' + e.message + '</span>';
+            }}
+        }}
+    }};
     </script>
     """
-    components.html(html, height=350)
+    
+    components.html(voice_html, height=320)
 
 # -----------------------------
 # AVATAR (talk indicator)
@@ -452,7 +454,6 @@ def save_user_to_excel(user_data):
         df = row
     df.to_excel(EXCEL_FILE, index=False)
 
-    # style + pseudo protection (structure lock)
     try:
         wb = load_workbook(EXCEL_FILE)
         ws = wb.active
@@ -462,7 +463,6 @@ def save_user_to_excel(user_data):
             c.fill = hdr_fill
             c.font = hdr_font
             c.alignment = Alignment(horizontal="center", vertical="center")
-        # autosize-ish
         for col in ws.columns:
             mx = 0
             letter = col[0].column_letter
@@ -488,7 +488,6 @@ def sidebar_patient_info(persona: Dict):
     st.write(f"**Current Meds:** {persona['current_meds']}")
     st.markdown("---")
 
-    # Avatar box
     st.markdown("### Patient Avatar")
     if st.session_state.avatar_placeholder is None:
         st.session_state.avatar_placeholder = st.empty()
@@ -500,12 +499,10 @@ def sidebar_patient_info(persona: Dict):
 
     st.markdown("---")
     st.markdown("### Settings")
-    # API key entry (if not provided)
     if not get_google_api_key():
-        st.info("Enter your GOOGLE_API_KEY to enable AI responses. (Stored only in memory for this session)")
+        st.info("Enter your GOOGLE_API_KEY to enable AI responses.")
         st.session_state.GOOGLE_API_KEY_UI = st.text_input("GOOGLE_API_KEY", type="password")
-    st.session_state.enable_tts = st.checkbox("Enable Patient Voice (Browser)", value=st.session_state.enable_tts)
-    st.selectbox("Voice Output Target", ["Browser (SpeechSynthesis)"], key="voice_output_target")
+    st.session_state.enable_tts = st.checkbox("Enable Patient Voice", value=st.session_state.enable_tts)
     st.markdown("---")
 
 def page_registration():
@@ -577,7 +574,7 @@ def page_menu():
         if os.path.exists("aliye.jpg"):
             st.image("aliye.jpg", use_container_width=True)
         else:
-            st.info("aliye.jpg not found in working directory.")
+            st.info("aliye.jpg not found")
         if st.button("Select Aliye Seker"):
             st.session_state.selected_persona = MDD_PERSONA
             st.rerun()
@@ -586,7 +583,7 @@ def page_menu():
         if os.path.exists("feride.jpg"):
             st.image("feride.jpg", use_container_width=True)
         else:
-            st.info("feride.jpg not found in working directory.")
+            st.info("feride.jpg not found")
         if st.button("Select Feride Deniz"):
             st.session_state.selected_persona = SCZ_PERSONA
             st.rerun()
@@ -623,6 +620,17 @@ def page_interview():
     part = st.session_state.selected_part
     sid = st.session_state.session_id
 
+    # Check for voice input from query params
+    query_params = st.query_params
+    if "voice_input" in query_params:
+        voice_text = query_params["voice_input"]
+        # Clear the query param
+        st.query_params.clear()
+        # Process the voice input
+        if voice_text and voice_text.strip():
+            handle_turn(voice_text.strip())
+            st.rerun()
+
     with st.sidebar:
         sidebar_patient_info(persona)
 
@@ -639,22 +647,19 @@ def page_interview():
     # Show conversation with avatars
     st.markdown("### Conversation History")
     
-    # Get patient avatar base64
     patient_photo = persona.get("photo", "")
     patient_avatar_b64 = get_image_base64(patient_photo)
     
-    # Get student avatar base64
     student_photo = st.session_state.user.get("photo_path", "")
     student_avatar_b64 = get_image_base64(student_photo)
     
     for role, msg, ts, source in st.session_state.conversation:
         if role == "Student":
-            # Student message with avatar
             col1, col2 = st.columns([1, 9])
             with col1:
                 if student_avatar_b64:
                     st.markdown(
-                        f'<img src="data:image/jpeg;base64,{student_avatar_b64}" style="width:100%;border-radius:50%;border:2px solid #3b82f6;">',
+                        f'<img src="data:image/jpeg;base64,{student_avatar_b64}" style="width:100%;border-radius:50%;border:3px solid #3b82f6;">',
                         unsafe_allow_html=True
                     )
                 else:
@@ -669,12 +674,11 @@ def page_interview():
                     unsafe_allow_html=True
                 )
         else:
-            # Patient message with avatar
             col1, col2 = st.columns([1, 9])
             with col1:
                 if patient_avatar_b64:
                     st.markdown(
-                        f'<img src="data:image/jpeg;base64,{patient_avatar_b64}" style="width:100%;border-radius:50%;border:2px solid #8b5cf6;">',
+                        f'<img src="data:image/jpeg;base64,{patient_avatar_b64}" style="width:100%;border-radius:50%;border:3px solid #8b5cf6;">',
                         unsafe_allow_html=True
                     )
                 else:
@@ -698,7 +702,7 @@ def page_interview():
     st.markdown("---")
     st.subheader("Your Input")
 
-    input_mode = st.radio("Choose input method", ["Text", "Voice (Browser)"], horizontal=True)
+    input_mode = st.radio("Choose input method", ["Text", "Voice (Automatic)"], horizontal=True)
 
     if input_mode == "Text":
         col1, col2 = st.columns([5,1])
@@ -710,30 +714,8 @@ def page_interview():
             handle_turn(user_text.strip())
             st.rerun()
     else:
-        st.info("Note: Voice recording works best in Chrome browser. Allow microphone access when prompted.")
-        
-        # Draw improved STT UI
-        voice_input_browser_ui()
-
-        # Manual paste/edit area with clearer instructions
-        st.markdown("#### Paste Transcript Here:")
-        colv1, colv2 = st.columns([5,1])
-        with colv1:
-            transcript_buf = st.text_area(
-                "After recording, copy the transcript from above and paste it here:",
-                key="voice_buf",
-                height=100,
-                placeholder="Paste your transcript here..."
-            )
-        with colv2:
-            st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
-            sendv = st.button("Send Voice", type="primary", use_container_width=True)
-        
-        if sendv and (transcript_buf or "").strip():
-            handle_turn(transcript_buf.strip())
-            # Clear the buffer
-            st.session_state.voice_transcript_buffer = ""
-            st.rerun()
+        st.info("Click 'Start Speaking', allow microphone access, speak your question. It will be sent automatically when you finish.")
+        voice_input_auto()
 
     st.markdown("---")
     c1, c2 = st.columns(2)
@@ -750,35 +732,28 @@ def handle_turn(user_input: str):
     persona = st.session_state.selected_persona
     part = st.session_state.selected_part
 
-    # Student line
     log_line("Student", user_input, "")
 
-    # Show avatar as listening
     photo = persona.get("photo", "")
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
     time.sleep(0.3)
 
-    # DB first
     ans = qa_lookup(user_input, persona["name"], part)
     source = "db" if ans else "ai"
     if not ans:
         ans = llm_reply(persona, part, user_input)
 
-    # Show avatar as speaking
     if os.path.exists(photo):
         show_avatar(photo, speaking=True, placeholder=st.session_state.avatar_placeholder)
     
-    # Speak (browser)
-    if st.session_state.enable_tts and st.session_state.voice_output_target.startswith("Browser"):
+    if st.session_state.enable_tts:
         speak_browser(ans)
-        time.sleep(1.5)  # Give time for speech to complete
+        time.sleep(1.5)
     
-    # Back to listening
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
 
-    # Add patient line
     log_line("Patient", ans, source)
 
 def page_evaluation():
@@ -821,7 +796,6 @@ def main():
     elif st.session_state.page == "evaluation":
         page_evaluation()
 
-    # footer
     st.markdown(
         """
         <div style="margin-top:24px;padding:12px;border-top:1px solid #e5e7eb;color:#6b7280">
