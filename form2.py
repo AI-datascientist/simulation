@@ -501,7 +501,7 @@ def page_interview():
             st.rerun()
     else:
         st.caption("Use the browser microphone (Chrome recommended).")
-        transcript = voice_input_browser(lang="en-US")
+        transcript = voice_input_browser()
     
         # Automatic send after speech stops
         if transcript:
@@ -613,4 +613,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
