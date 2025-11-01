@@ -8,10 +8,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 from difflib import SequenceMatcher
+from io import BytesIO
 
-# -----------------------------
+# =============================
 # OPTIONAL DEPS (gracefully degrade)
-# -----------------------------
+# =============================
 try:
     import google.generativeai as genai
     _GENAI_IMPORT_OK = True
@@ -26,16 +27,21 @@ try:
 except Exception:
     _XLSX_OK = False
 
-# Browser speech-to-text (preferred)
 try:
-    from streamlit_browser_speech import speech_to_text
-    _BROWSER_SPEECH_OK = True
+    from audio_recorder_streamlit import audio_recorder
+    _RECORDER_OK = True
 except Exception:
-    _BROWSER_SPEECH_OK = False
+    _RECORDER_OK = False
 
-# -----------------------------
+try:
+    import speech_recognition as sr
+    _SR_OK = True
+except Exception:
+    _SR_OK = False
+
+# =============================
 # CONFIG
-# -----------------------------
+# =============================
 APP_TITLE = "Psychiatric Interview Simulation"
 LOG_DIR = "logs"
 USER_DIR = "users"
@@ -48,15 +54,14 @@ DOWNLOAD_PASSWORD = "download456"
 
 # Prefer env or secrets; allow UI entry
 _GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY", "").strip()
-_GOOGLE_API_KEY_SEC = ""
 try:
     _GOOGLE_API_KEY_SEC = st.secrets.get("GOOGLE_API_KEY", "").strip()
 except Exception:
     _GOOGLE_API_KEY_SEC = ""
 
-# -----------------------------
+# =============================
 # PAGE SETUP + BACKGROUND
-# -----------------------------
+# =============================
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon="👥",
@@ -65,7 +70,6 @@ st.set_page_config(
 )
 
 def set_background_from_file(path: str):
-    """If background image exists, set as page bg; otherwise keep default."""
     if not os.path.exists(path):
         return
     try:
@@ -97,9 +101,9 @@ def set_background_from_file(path: str):
 
 set_background_from_file("bck.jpg")
 
-# -----------------------------
+# =============================
 # PERSONAS
-# -----------------------------
+# =============================
 MDD_PERSONA = {
     "name": "Aliye Seker",
     "age": 40,
@@ -119,9 +123,9 @@ SCZ_PERSONA = {
     "speech_style": "Guarded, may be tangential; paranoid themes."
 }
 
-# -----------------------------
+# =============================
 # SIMPLE STANDARDIZED QA DB (demo)
-# -----------------------------
+# =============================
 ALI_QA_DATABASE = [
     {"q": "How are you feeling today", "a": "I still feel like I'm in a dark hole. Nothing seems to help.", "part": "Part 1"},
     {"q": "Do you have thoughts of harming yourself", "a": "I've had those thoughts… but I don't want to go into details.", "part": "Part 1"},
@@ -132,9 +136,9 @@ FERDI_QA_DATABASE = [
     {"q": "Do you hear voices", "a": "Sometimes… but they're quieter when I stay calm.", "part": "Part 2"},
 ]
 
-# -----------------------------
+# =============================
 # STATE / UTIL
-# -----------------------------
+# =============================
 def ensure_state_defaults():
     ss = st.session_state
     ss.setdefault("page", "registration")
@@ -182,7 +186,6 @@ def qa_lookup(user_q: Any, persona_name: str, part: str) -> Optional[str]:
     return None
 
 def get_image_base64(image_path: str) -> str:
-    """Convert image to base64 for embedding in HTML"""
     if not os.path.exists(image_path):
         return ""
     try:
@@ -191,9 +194,9 @@ def get_image_base64(image_path: str) -> str:
     except Exception:
         return ""
 
-# -----------------------------
+# =============================
 # GEMINI
-# -----------------------------
+# =============================
 def get_google_api_key() -> str:
     if _GOOGLE_API_KEY_ENV:
         return _GOOGLE_API_KEY_ENV
@@ -216,35 +219,68 @@ def build_system_prompt(persona: Dict, part: str) -> str:
         stage = "Day 2 acute admission" if part == "Part 1" else "Day 7 reassessment"
         return (
             f"You are {persona['name']}, {persona['age']}, {persona['gender']} with severe depression. "
-            f"Stage: {stage}. Speak briefly, slow, and hopeless. Avoid specific self-harm methods. "
-            f"Stay in character and answer naturally in 1–3 sentences."
+            f"Stage: {stage}. Speak briefly, slow, hopeless. Avoid specific self-harm methods. "
+            f"Stay in character and answer in 1–3 short sentences."
         )
     else:
         stage = "Day 3 acute psychosis" if part == "Part 1" else "Day 14 stabilizing"
         return (
             f"You are {persona['name']}, {persona['age']}, {persona['gender']} with paranoid schizophrenia. "
-            f"Stage: {stage}. Be guarded; mild tangentiality allowed; do not give medical advice. "
-            f"Stay in character and answer naturally in 1–3 sentences."
+            f"Stage: {stage}. Be guarded; mild tangentiality allowed; no medical advice. "
+            f"Stay in character and answer in 1–3 short sentences."
         )
 
 def llm_reply(persona: Dict, part: str, user_text: str) -> str:
-    if not init_gemini():
-        return "I'm having trouble responding right now."
-    sys_prompt = build_system_prompt(persona, part)
-    try:
-        model = genai.GenerativeModel(model_name="gemini-2.0-flash-exp", system_instruction=sys_prompt)
-        r = model.generate_content(user_text)
-        text = (getattr(r, "text", None) or "").strip()
-        text = re.sub(r"\[.*?\]", "", text)
-        return text or "I'm not sure how to answer that."
-    except Exception:
-        return "I'm having trouble responding right now."
+    # Try Gemini
+    if init_gemini():
+        try:
+            sys_prompt = build_system_prompt(persona, part)
+            model = genai.GenerativeModel(model_name="gemini-2.0-flash", system_instruction=sys_prompt)
+            r = model.generate_content(user_text)
+            text = (getattr(r, "text", None) or "").strip()
+            text = re.sub(r"\[.*?\]", "", text)
+            if text:
+                return text
+        except Exception:
+            pass
+    # Fallback (no API key or error)
+    return fallback_reply(persona, part, user_text)
 
-# -----------------------------
+def fallback_reply(persona: Dict, part: str, user_text: str) -> str:
+    """Rule-based minimal reply so the app never stays silent."""
+    name = persona["name"]
+    if name == "Aliye Seker":
+        bank_part1 = [
+            "It’s hard to feel anything. Most days are just heavy.",
+            "I don’t have much energy… getting out of bed is a struggle.",
+            "I sleep poorly and wake up early, feeling worse."
+        ]
+        bank_part2 = [
+            "A little different… but the sadness is still there.",
+            "I can do small things again, but it feels empty.",
+            "I’m trying, but I still feel numb."
+        ]
+        bank = bank_part1 if part == "Part 1" else bank_part2
+    else:
+        bank_part1 = [
+            "I don’t really trust this place… the food doesn’t feel safe.",
+            "People look at me like they know my thoughts.",
+            "I can talk but I’d rather keep to myself."
+        ]
+        bank_part2 = [
+            "It’s quieter now… I can think a bit clearer.",
+            "I still feel watched sometimes, so I’m careful.",
+            "I’m taking the meds. It helps me stay calm."
+        ]
+        bank = bank_part1 if part == "Part 1" else bank_part2
+    # simple pick based on input hash for variety
+    idx = abs(hash(user_text)) % len(bank) if user_text else 0
+    return bank[idx]
+
+# =============================
 # BROWSER TTS (SpeechSynthesis)
-# -----------------------------
+# =============================
 def speak_browser(text: str):
-    """Speak on client using Web Speech API (no server audio)."""
     escaped = (text or "").replace("\\", "\\\\").replace("`", "\\`").replace("</", "<\\/")
     components.html(
         f"""
@@ -252,122 +288,53 @@ def speak_browser(text: str):
         const text = `{escaped}`;
         try {{
             const u = new SpeechSynthesisUtterance(text);
-            u.rate = 0.9;
-            u.pitch = 1.0;
-            u.lang = 'en-US';
-            window.speechSynthesis.cancel();
-            window.speechSynthesis.speak(u);
+            u.rate = 0.9; u.pitch = 1.0; u.lang = 'en-US';
+            window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);
         }} catch(e) {{}}
         </script>
         """,
         height=0
     )
 
-# -----------------------------
-# SIMPLE HTML MIC (visual only; no Python return)
-# -----------------------------
-def voice_input_with_button():
-    """
-    Pretty HTML microphone box for UX consistency.
-    NOTE: This DOES NOT return transcript to Python. Use `speech_to_text` when available.
-    """
-    voice_html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-            .container { max-width: 100%; background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-                         border: 3px solid #10b981; border-radius: 16px; padding: 24px; text-align: center; }
-            h3 { margin: 0 0 8px 0; color: #065f46; font-size: 20px; }
-            .subtitle { color: #047857; margin-bottom: 20px; font-size: 14px; }
-            #voiceBtn { padding: 16px 40px; font-size: 18px; background: #10b981; color: white; border: none;
-                        border-radius: 12px; cursor: pointer; font-weight: 600; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                        transition: all 0.3s; }
-            #voiceBtn:hover { background: #059669; transform: translateY(-2px); box-shadow: 0 6px 8px rgba(0,0,0,0.15); }
-            #voiceBtn:disabled { background: #9ca3af; cursor: not-allowed; transform: none; }
-            #voiceBtn.recording { background: #ef4444; animation: pulse 1.5s infinite; }
-            @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
-            .status { margin-top: 16px; padding: 12px; background: white; border-radius: 8px; color: #065f46;
-                      font-weight: 600; min-height: 50px; display: flex; align-items: center; justify-content: center; }
-            .transcript { margin-top: 12px; padding: 16px; background: white; border-radius: 8px; color: #1e40af;
-                          min-height: 60px; text-align: left; font-size: 15px; line-height: 1.6; }
-            .error { color: #dc2626; }
-            .success { color: #059669; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h3>Voice Input (Browser)</h3>
-            <p class="subtitle">Install <code>streamlit-browser-speech</code> for Python-side transcript. This demo UI does not return text.</p>
-            <button id="voiceBtn">Start Speaking</button>
-            <div id="status" class="status">Ready to record</div>
-            <div id="transcript" class="transcript">Your transcript will appear here (visual only)...</div>
+# =============================
+# AUDIO → STT
+# =============================
+def transcribe_wav_bytes(wav_bytes: bytes, language: str = "en-US") -> str:
+    if not (_SR_OK and wav_bytes):
+        return ""
+    r = sr.Recognizer()
+    try:
+        with sr.AudioFile(BytesIO(wav_bytes)) as source:
+            audio = r.record(source)
+        text = r.recognize_google(audio, language=language)  # anahtarsız
+        return (text or "").strip()
+    except Exception:
+        return ""
+
+# =============================
+# SIMPLE HTML MIC (visual only; optional)
+# =============================
+def voice_input_visual_only():
+    components.html(
+        """
+        <div style="border:3px solid #10b981;border-radius:14px;padding:16px;background:#ecfeff">
+          <b>Voice Input (visual demo)</b><br>
+          This microphone is visual-only. Use the big button below to record.
         </div>
-        <script>
-            const voiceBtn = document.getElementById('voiceBtn');
-            const statusEl = document.getElementById('status');
-            const transcriptEl = document.getElementById('transcript');
-            let recognition = null; let isListening = false; let finalTranscript = '';
+        """,
+        height=120
+    )
 
-            function isSupported() { return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window); }
-            if (!isSupported()) { statusEl.innerHTML = '<span class="error">Use Chrome for speech recognition.</span>'; voiceBtn.disabled = true; }
-
-            function initRecognition() {
-                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                recognition = new SpeechRecognition();
-                recognition.lang = 'en-US'; recognition.continuous = false; recognition.interimResults = true; recognition.maxAlternatives = 1;
-
-                recognition.onstart = () => { isListening = true; voiceBtn.textContent = 'Listening... Click to stop';
-                    voiceBtn.classList.add('recording'); statusEl.innerHTML = '<span class="success">🎤 Listening... Speak now!</span>';
-                    transcriptEl.textContent = 'Listening...'; };
-
-                recognition.onresult = (event) => {
-                    let interimTranscript = ''; finalTranscript = '';
-                    for (let i = 0; i < event.results.length; i++) {
-                        const transcript = event.results[i][0].transcript;
-                        if (event.results[i].isFinal) finalTranscript += transcript + ' ';
-                        else interimTranscript += transcript;
-                    }
-                    if (finalTranscript) transcriptEl.innerHTML = '<strong>You said:</strong> ' + finalTranscript;
-                    else if (interimTranscript) transcriptEl.innerHTML = '<em style="color:#6b7280;">Recognizing:</em> ' + interimTranscript;
-                };
-
-                recognition.onend = () => { isListening = false; voiceBtn.textContent = 'Start Speaking';
-                    voiceBtn.classList.remove('recording');
-                    statusEl.innerHTML = 'Recognition ended (UI only).'; };
-
-                recognition.onerror = (event) => { isListening = false; voiceBtn.textContent = 'Start Speaking';
-                    voiceBtn.classList.remove('recording');
-                    let errorMsg = 'Error: ' + event.error;
-                    if (event.error === 'no-speech') errorMsg = 'No speech detected. Try again.';
-                    else if (event.error === 'not-allowed') errorMsg = 'Microphone access denied.';
-                    else if (event.error === 'network') errorMsg = 'Network error.';
-                    statusEl.innerHTML = '<span class="error">' + errorMsg + '</span>';
-                    transcriptEl.textContent = 'Click button to try again...'; };
-            }
-
-            voiceBtn.onclick = () => {
-                if (!isSupported()) return;
-                if (!recognition) initRecognition();
-                if (isListening) recognition.stop(); else { finalTranscript = ''; try { recognition.start(); } catch(e) { statusEl.innerHTML = '<span class="error">Error starting: ' + e.message + '</span>'; } }
-            };
-        </script>
-    </body>
-    </html>
-    """
-    components.html(voice_html, height=400)  # NO key, no return
-
-# -----------------------------
+# =============================
 # AVATAR (talk indicator)
-# -----------------------------
+# =============================
 def show_avatar(photo_path: str, speaking: bool, placeholder=None):
     if not os.path.exists(photo_path):
         return
     if placeholder is None:
         placeholder = st.empty()
     with placeholder.container():
-        st.image(photo_path, use_container_width=True)
+        st.image(photo_path, width="stretch")
         if speaking:
             st.markdown(
                 """
@@ -384,9 +351,9 @@ def show_avatar(photo_path: str, speaking: bool, placeholder=None):
                 unsafe_allow_html=True
             )
 
-# -----------------------------
+# =============================
 # REGISTRATION
-# -----------------------------
+# =============================
 def save_user_profile(username, data):
     path = os.path.join(USER_DIR, f"{username}.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -427,12 +394,10 @@ def save_user_to_excel(user_data):
         hdr_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         hdr_font = Font(bold=True, color="FFFFFF")
         for c in ws[1]:
-            c.fill = hdr_fill
-            c.font = hdr_font
+            c.fill = hdr_fill; c.font = hdr_font
             c.alignment = Alignment(horizontal="center", vertical="center")
         for col in ws.columns:
-            mx = 0
-            letter = col[0].column_letter
+            mx = 0; letter = col[0].column_letter
             for cell in col:
                 if cell.value:
                     mx = max(mx, len(str(cell.value)))
@@ -443,9 +408,9 @@ def save_user_to_excel(user_data):
     except Exception:
         pass
 
-# -----------------------------
+# =============================
 # UI PIECES
-# -----------------------------
+# =============================
 def sidebar_patient_info(persona: Dict):
     st.markdown("### Patient Information")
     st.write(f"**Name:** {persona['name']}")
@@ -539,7 +504,7 @@ def page_menu():
     with c1:
         st.subheader("Aliye Seker — MDD")
         if os.path.exists("aliye.jpg"):
-            st.image("aliye.jpg", use_container_width=True)
+            st.image("aliye.jpg", width="stretch")
         else:
             st.info("aliye.jpg not found")
         if st.button("Select Aliye Seker"):
@@ -548,7 +513,7 @@ def page_menu():
     with c2:
         st.subheader("Feride Deniz — Schizophrenia")
         if os.path.exists("feride.jpg"):
-            st.image("feride.jpg", use_container_width=True)
+            st.image("feride.jpg", width="stretch")
         else:
             st.info("feride.jpg not found")
         if st.button("Select Feride Deniz"):
@@ -600,7 +565,7 @@ def page_interview():
         unsafe_allow_html=True
     )
 
-    # Show conversation with avatars
+    # Conversation
     st.markdown("### Conversation History")
     patient_photo = persona.get("photo", "")
     patient_avatar_b64 = get_image_base64(patient_photo)
@@ -663,34 +628,31 @@ def page_interview():
         with col1:
             user_text = st.text_input("Type your question or statement:", key="text_in")
         with col2:
-            send = st.button("Send", type="primary", use_container_width=True)
+            send = st.button("Send", type="primary")
         if send and (user_text or "").strip():
             handle_turn(user_text.strip())
             st.rerun()
     else:
-        st.info("Click the mic, allow microphone access, speak clearly. Your message will be sent automatically.")
+        st.info("Press the mic to record. Release to stop. The transcript will be sent automatically.")
+        transcript = None
 
-        if _BROWSER_SPEECH_OK:
-            # Returns transcript to Python
-            transcript = speech_to_text(
-                language="en-US",         # or "tr-TR"
-                start_prompt="🎤 Start Speaking",
-                stop_prompt="⏹ Stop",
-                just_once=True,
-                use_container_width=True
-            )
-            if transcript and transcript.strip():
-                if transcript != st.session_state.get("pending_voice_input", ""):
-                    st.session_state.pending_voice_input = transcript
-                    handle_turn(transcript.strip())
-                    st.rerun()
+        if _RECORDER_OK:
+            audio_bytes = audio_recorder(text="🎙️ Press & hold to record", pause_threshold=2.0)
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                # Dil: "en-US" veya "tr-TR"
+                transcript = transcribe_wav_bytes(audio_bytes, language="en-US")
+                if transcript:
+                    st.success(f"Transcript: {transcript}")
         else:
-            st.warning(
-                "Voice capture library not installed. Add `streamlit-browser-speech==0.5.0` to requirements.txt "
-                "or use Text mode."
-            )
-            # Show pretty (non-returning) HTML mic so UI doesn't look empty
-            voice_input_with_button()
+            st.error("audio-recorder-streamlit not available. Add it to requirements.txt or use Text mode.")
+            voice_input_visual_only()
+
+        if transcript:
+            if transcript != st.session_state.get("pending_voice_input", ""):
+                st.session_state.pending_voice_input = transcript
+                handle_turn(transcript)
+                st.rerun()
 
     st.markdown("---")
     c1, c2 = st.columns(2)
@@ -704,64 +666,50 @@ def page_interview():
             st.rerun()
 
 def handle_turn(user_input: str):
-    """Process user input and get patient response"""
     persona = st.session_state.selected_persona
     part = st.session_state.selected_part
 
-    # Log student message
     log_line("Student", user_input, "")
 
-    # Update avatar to listening
     photo = persona.get("photo", "")
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
 
-    # Small delay for visual feedback
-    time.sleep(0.3)
+    time.sleep(0.25)
 
-    # Get patient response (DB first, then AI)
     ans = qa_lookup(user_input, persona["name"], part)
     source = "db" if ans else "ai"
     if not ans:
         ans = llm_reply(persona, part, user_input)
 
-    # Update avatar to speaking
     if os.path.exists(photo):
         show_avatar(photo, speaking=True, placeholder=st.session_state.avatar_placeholder)
 
-    # Speak the response
     if st.session_state.enable_tts:
         speak_browser(ans)
-        time.sleep(1.0)
+        time.sleep(0.8)
 
-    # Back to listening
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
 
-    # Log patient response
     log_line("Patient", ans, source)
 
 def page_evaluation():
-    persona = st.session_state.selected_persona
-    part = st.session_state.selected_part
-    sid = st.session_state.session_id
-
-    st.success("Interview Completed. You can start a new session from the menu.")
     db = sum(1 for r in st.session_state.conversation if r[0]=="Patient" and r[3]=="db")
     ai = sum(1 for r in st.session_state.conversation if r[0]=="Patient" and r[3]=="ai")
+    st.success("Interview Completed. You can start a new session from the menu.")
     c1, c2 = st.columns(2)
     with c1:
         st.metric("Standardized Responses", db)
     with c2:
         st.metric("AI Responses", ai)
-
     if st.button("Back to Menu", type="primary"):
         st.session_state.page = "menu"
         st.rerun()
 
-# -----------------------------
+# =============================
 # MAIN
-# -----------------------------
+# =============================
 def main():
     if st.session_state.page == "registration":
         page_registration()
