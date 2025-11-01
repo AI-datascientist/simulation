@@ -319,7 +319,7 @@ def app():
 
         ts2 = datetime.datetime.now().strftime("%H:%M:%S")
         st.session_state.chat.append(("Patient", resp, ts2))
-        st.experimental_rerun()
+        st.rerun()
 
     # Speak last patient turn
     if st.session_state.chat and tts_on:
@@ -339,3 +339,4 @@ def app():
 
 if __name__ == "__main__":
     app()
+
