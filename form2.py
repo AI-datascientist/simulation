@@ -139,6 +139,63 @@ def ensure_state_defaults():
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
 
 ensure_state_defaults()
+def voice_input_browser():
+    """Capture one-shot STT with Web Speech API; returns transcript or ''."""
+    html = """
+    <div style="padding:8px;border:1px solid #ddd;border-radius:10px;background:#fff;">
+      <button id="startBtn">🎙️ Start</button>
+      <button id="stopBtn" disabled>⏹️ Stop</button>
+      <span id="status" style="margin-left:8px;color:#555;">Idle</span>
+      <div id="out" style="margin-top:8px;font-weight:600;"></div>
+    </div>
+    <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn  = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const outEl    = document.getElementById('out');
+    let rec=null; let finalText = "";
+
+    function isSupported(){
+      return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+    }
+
+    function createRec(){
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const r = new SR();
+      r.lang = 'en-US';
+      r.interimResults = true;
+      r.maxAlternatives = 1;
+      r.onstart = ()=>{ statusEl.textContent='🎙️ Listening...'; };
+      r.onresult = (e)=>{
+        let t = "";
+        for (let i= e.resultIndex;i<e.results.length;i++){ t += e.results[i][0].transcript; }
+        outEl.textContent = t;
+        finalText = t;
+      };
+      r.onend = ()=>{ statusEl.textContent='Stopped'; startBtn.disabled=false; stopBtn.disabled=true; };
+      r.onerror = ()=>{ statusEl.textContent='Error'; startBtn.disabled=false; stopBtn.disabled=true; };
+      return r;
+    }
+
+    if(!isSupported()){
+      statusEl.textContent = 'Browser STT not supported.';
+      startBtn.disabled = true;
+    }
+
+    startBtn.onclick = ()=>{
+      finalText = ""; outEl.textContent = "";
+      if(!rec) rec = createRec();
+      startBtn.disabled = true; stopBtn.disabled = false;
+      rec.start();
+    };
+    stopBtn.onclick = ()=>{
+      if(rec) rec.stop();
+      setTimeout(()=>{ if(finalText){ window.parent.postMessage({type:'streamlit:setComponentValue', value:finalText}, '*'); finalText=""; } },500);
+    };
+    </script>
+    """
+    val = st.components.v1.html(html, height=150)
+    return val
 
 def timestamp():
     return datetime.datetime.now().strftime("%H:%M:%S")
@@ -613,5 +670,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
