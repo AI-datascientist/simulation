@@ -141,7 +141,7 @@ def ensure_state_defaults():
     ss.setdefault("enable_tts", True)
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
-    ss.setdefault("voice_active", False)
+    ss.setdefault("voice_recording", False)
 
 ensure_state_defaults()
 
@@ -257,139 +257,246 @@ def speak_browser(text: str):
     )
 
 # -----------------------------
-# BROWSER STT (AUTO-SUBMIT)
+# BROWSER STT COMPONENT (WORKING VERSION)
 # -----------------------------
-def voice_input_auto():
+def voice_input_component():
     """
-    Automatic voice input using Web Speech API.
-    When user finishes speaking, automatically sends the transcript via query params.
+    Voice input component using Streamlit Components API.
+    Returns the transcript when user finishes speaking.
     """
-    
-    # Generate unique session ID for this voice session
-    if "voice_session_id" not in st.session_state:
-        st.session_state.voice_session_id = str(uuid.uuid4())[:8]
-    
-    voice_html = f"""
-    <div style="padding:20px;border:3px solid #10b981;border-radius:16px;background:linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);text-align:center;">
-        <div style="margin-bottom:16px;">
-            <h3 style="margin:0 0 8px 0;color:#065f46;">Voice Input (Automatic)</h3>
-            <p style="margin:0;color:#047857;font-size:14px;">Click the button and speak. Your speech will be sent automatically.</p>
+    voice_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {
+                margin: 0;
+                padding: 20px;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            }
+            .container {
+                max-width: 100%;
+                background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+                border: 3px solid #10b981;
+                border-radius: 16px;
+                padding: 24px;
+                text-align: center;
+            }
+            h3 {
+                margin: 0 0 8px 0;
+                color: #065f46;
+                font-size: 20px;
+            }
+            .subtitle {
+                color: #047857;
+                margin-bottom: 20px;
+                font-size: 14px;
+            }
+            #voiceBtn {
+                padding: 16px 40px;
+                font-size: 18px;
+                background: #10b981;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                cursor: pointer;
+                font-weight: 600;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                transition: all 0.3s;
+            }
+            #voiceBtn:hover {
+                background: #059669;
+                transform: translateY(-2px);
+                box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+            }
+            #voiceBtn:disabled {
+                background: #9ca3af;
+                cursor: not-allowed;
+                transform: none;
+            }
+            #voiceBtn.recording {
+                background: #ef4444;
+                animation: pulse 1.5s infinite;
+            }
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.7; }
+            }
+            .status {
+                margin-top: 16px;
+                padding: 12px;
+                background: white;
+                border-radius: 8px;
+                color: #065f46;
+                font-weight: 600;
+                min-height: 50px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .transcript {
+                margin-top: 12px;
+                padding: 16px;
+                background: white;
+                border-radius: 8px;
+                color: #1e40af;
+                min-height: 60px;
+                text-align: left;
+                font-size: 15px;
+                line-height: 1.6;
+            }
+            .error {
+                color: #dc2626;
+            }
+            .success {
+                color: #059669;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h3>Voice Input (Automatic)</h3>
+            <p class="subtitle">Click and speak - your message will be sent automatically</p>
+            
+            <button id="voiceBtn">Start Speaking</button>
+            
+            <div id="status" class="status">
+                Ready to record
+            </div>
+            
+            <div id="transcript" class="transcript">
+                Your transcript will appear here...
+            </div>
         </div>
         
-        <button id="voiceBtn" style="padding:16px 32px;font-size:18px;background:#10b981;color:white;border:none;border-radius:12px;cursor:pointer;font-weight:600;box-shadow:0 4px 6px rgba(0,0,0,0.1);transition:all 0.3s;">
-            Start Speaking
-        </button>
-        
-        <div id="status" style="margin-top:16px;padding:12px;background:white;border-radius:8px;color:#065f46;font-weight:600;min-height:50px;display:flex;align-items:center;justify-content:center;">
-            Click button to start
-        </div>
-        
-        <div id="transcript" style="margin-top:12px;padding:12px;background:white;border-radius:8px;color:#1e40af;min-height:60px;text-align:left;font-size:15px;"></div>
-    </div>
-    
-    <script>
-    const voiceBtn = document.getElementById('voiceBtn');
-    const statusEl = document.getElementById('status');
-    const transcriptEl = document.getElementById('transcript');
-    
-    let recognition = null;
-    let isListening = false;
-    
-    function isSupported() {{
-        return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
-    }}
-    
-    if (!isSupported()) {{
-        statusEl.innerHTML = '<span style="color:#dc2626;">Browser does not support speech recognition. Please use Chrome.</span>';
-        voiceBtn.disabled = true;
-        voiceBtn.style.background = '#9ca3af';
-    }}
-    
-    function initRecognition() {{
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        recognition = new SpeechRecognition();
-        recognition.lang = 'en-US';
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 1;
-        
-        recognition.onstart = () => {{
-            isListening = true;
-            statusEl.innerHTML = '<span style="color:#059669;">Listening... Speak now!</span>';
-            voiceBtn.textContent = 'Listening...';
-            voiceBtn.style.background = '#ef4444';
-            transcriptEl.textContent = '';
-        }};
-        
-        recognition.onresult = (event) => {{
-            let interimTranscript = '';
+        <script>
+            const voiceBtn = document.getElementById('voiceBtn');
+            const statusEl = document.getElementById('status');
+            const transcriptEl = document.getElementById('transcript');
+            
+            let recognition = null;
+            let isListening = false;
             let finalTranscript = '';
             
-            for (let i = 0; i < event.results.length; i++) {{
-                const transcript = event.results[i][0].transcript;
-                if (event.results[i].isFinal) {{
-                    finalTranscript += transcript + ' ';
-                }} else {{
-                    interimTranscript += transcript;
-                }}
-            }}
+            // Check browser support
+            function isSupported() {
+                return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+            }
             
-            if (finalTranscript) {{
-                transcriptEl.innerHTML = '<strong>Final:</strong> ' + finalTranscript;
-            }} else {{
-                transcriptEl.innerHTML = '<em style="color:#6b7280;">Interim:</em> ' + interimTranscript;
-            }}
-        }};
-        
-        recognition.onend = () => {{
-            isListening = false;
-            const finalText = transcriptEl.textContent.replace('Final: ', '').trim();
+            if (!isSupported()) {
+                statusEl.innerHTML = '<span class="error">Speech recognition not supported. Please use Chrome browser.</span>';
+                voiceBtn.disabled = true;
+            }
             
-            if (finalText && finalText.length > 0) {{
-                statusEl.innerHTML = '<span style="color:#059669;">Processing... Sending your message</span>';
+            // Initialize recognition
+            function initRecognition() {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition = new SpeechRecognition();
                 
-                // Send to Streamlit via query params
-                const currentUrl = window.location.href.split('?')[0];
-                const newUrl = currentUrl + '?voice_input=' + encodeURIComponent(finalText) + '&ts=' + Date.now();
-                window.location.href = newUrl;
-            }} else {{
-                statusEl.innerHTML = '<span style="color:#dc2626;">No speech detected. Please try again.</span>';
-                voiceBtn.textContent = 'Start Speaking';
-                voiceBtn.style.background = '#10b981';
-            }}
-        }};
-        
-        recognition.onerror = (event) => {{
-            isListening = false;
-            statusEl.innerHTML = '<span style="color:#dc2626;">Error: ' + event.error + '</span>';
-            voiceBtn.textContent = 'Start Speaking';
-            voiceBtn.style.background = '#10b981';
+                recognition.lang = 'en-US';
+                recognition.continuous = false;
+                recognition.interimResults = true;
+                recognition.maxAlternatives = 1;
+                
+                recognition.onstart = () => {
+                    isListening = true;
+                    voiceBtn.textContent = 'Listening... Click to stop';
+                    voiceBtn.classList.add('recording');
+                    statusEl.innerHTML = '<span class="success">🎤 Listening... Speak now!</span>';
+                    transcriptEl.textContent = 'Listening...';
+                };
+                
+                recognition.onresult = (event) => {
+                    let interimTranscript = '';
+                    finalTranscript = '';
+                    
+                    for (let i = 0; i < event.results.length; i++) {
+                        const transcript = event.results[i][0].transcript;
+                        if (event.results[i].isFinal) {
+                            finalTranscript += transcript + ' ';
+                        } else {
+                            interimTranscript += transcript;
+                        }
+                    }
+                    
+                    if (finalTranscript) {
+                        transcriptEl.innerHTML = '<strong>You said:</strong> ' + finalTranscript;
+                    } else if (interimTranscript) {
+                        transcriptEl.innerHTML = '<em style="color:#6b7280;">Recognizing:</em> ' + interimTranscript;
+                    }
+                };
+                
+                recognition.onend = () => {
+                    isListening = false;
+                    voiceBtn.textContent = 'Start Speaking';
+                    voiceBtn.classList.remove('recording');
+                    
+                    const cleanTranscript = finalTranscript.trim();
+                    
+                    if (cleanTranscript && cleanTranscript.length > 0) {
+                        statusEl.innerHTML = '<span class="success">✓ Sending your message...</span>';
+                        transcriptEl.innerHTML = '<strong>Sending:</strong> ' + cleanTranscript;
+                        
+                        // Send to Streamlit
+                        window.parent.postMessage({
+                            type: 'streamlit:setComponentValue',
+                            value: cleanTranscript
+                        }, '*');
+                        
+                        // Reset after short delay
+                        setTimeout(() => {
+                            statusEl.innerHTML = 'Ready to record again';
+                            transcriptEl.textContent = 'Click button to start new recording...';
+                            finalTranscript = '';
+                        }, 1000);
+                    } else {
+                        statusEl.innerHTML = '<span class="error">No speech detected. Please try again.</span>';
+                        transcriptEl.textContent = 'Click button to try again...';
+                    }
+                };
+                
+                recognition.onerror = (event) => {
+                    isListening = false;
+                    voiceBtn.textContent = 'Start Speaking';
+                    voiceBtn.classList.remove('recording');
+                    
+                    let errorMsg = 'Error: ' + event.error;
+                    if (event.error === 'no-speech') {
+                        errorMsg = 'No speech detected. Please try again and speak clearly.';
+                    } else if (event.error === 'not-allowed') {
+                        errorMsg = 'Microphone access denied. Please allow microphone in browser settings.';
+                    } else if (event.error === 'network') {
+                        errorMsg = 'Network error. Please check your connection.';
+                    }
+                    
+                    statusEl.innerHTML = '<span class="error">' + errorMsg + '</span>';
+                    transcriptEl.textContent = 'Click button to try again...';
+                };
+            }
             
-            if (event.error === 'no-speech') {{
-                statusEl.innerHTML = '<span style="color:#dc2626;">No speech detected. Click and speak again.</span>';
-            }}
-        }};
-    }}
-    
-    voiceBtn.onclick = () => {{
-        if (!recognition) {{
-            initRecognition();
-        }}
-        
-        if (isListening) {{
-            recognition.stop();
-        }} else {{
-            try {{
-                recognition.start();
-            }} catch(e) {{
-                statusEl.innerHTML = '<span style="color:#dc2626;">Error: ' + e.message + '</span>';
-            }}
-        }}
-    }};
-    </script>
+            // Button click handler
+            voiceBtn.onclick = () => {
+                if (!recognition) {
+                    initRecognition();
+                }
+                
+                if (isListening) {
+                    recognition.stop();
+                } else {
+                    finalTranscript = '';
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        statusEl.innerHTML = '<span class="error">Error starting: ' + e.message + '</span>';
+                    }
+                }
+            };
+        </script>
+    </body>
+    </html>
     """
     
-    components.html(voice_html, height=320)
+    return components.html(voice_html, height=400)
 
 # -----------------------------
 # AVATAR (talk indicator)
@@ -620,17 +727,6 @@ def page_interview():
     part = st.session_state.selected_part
     sid = st.session_state.session_id
 
-    # Check for voice input from query params
-    query_params = st.query_params
-    if "voice_input" in query_params:
-        voice_text = query_params["voice_input"]
-        # Clear the query param
-        st.query_params.clear()
-        # Process the voice input
-        if voice_text and voice_text.strip():
-            handle_turn(voice_text.strip())
-            st.rerun()
-
     with st.sidebar:
         sidebar_patient_info(persona)
 
@@ -702,7 +798,7 @@ def page_interview():
     st.markdown("---")
     st.subheader("Your Input")
 
-    input_mode = st.radio("Choose input method", ["Text", "Voice (Automatic)"], horizontal=True)
+    input_mode = st.radio("Choose input method", ["Text", "Voice (Automatic)"], horizontal=True, key="input_mode_radio")
 
     if input_mode == "Text":
         col1, col2 = st.columns([5,1])
@@ -714,8 +810,15 @@ def page_interview():
             handle_turn(user_text.strip())
             st.rerun()
     else:
-        st.info("Click 'Start Speaking', allow microphone access, speak your question. It will be sent automatically when you finish.")
-        voice_input_auto()
+        st.info("Click 'Start Speaking' button, allow microphone access, and speak clearly. Your message will be sent automatically.")
+        
+        # Voice input component
+        voice_result = voice_input_component()
+        
+        # Check if we got a transcript
+        if voice_result and isinstance(voice_result, str) and voice_result.strip():
+            handle_turn(voice_result.strip())
+            st.rerun()
 
     st.markdown("---")
     c1, c2 = st.columns(2)
