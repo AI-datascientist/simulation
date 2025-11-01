@@ -153,6 +153,8 @@ def ensure_state_defaults():
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
     ss.setdefault("pending_voice_input", "")
+    # 🔒 Stable recorder key so the mic never disappears after re-renders
+    ss.setdefault("recorder_key", f"rec_{uuid.uuid4().hex[:8]}")
 
 ensure_state_defaults()
 
@@ -273,7 +275,6 @@ def fallback_reply(persona: Dict, part: str, user_text: str) -> str:
             "I’m taking the meds. It helps me stay calm."
         ]
         bank = bank_part1 if part == "Part 1" else bank_part2
-    # simple pick based on input hash for variety
     idx = abs(hash(user_text)) % len(bank) if user_text else 0
     return bank[idx]
 
@@ -306,20 +307,20 @@ def transcribe_wav_bytes(wav_bytes: bytes, language: str = "en-US") -> str:
     try:
         with sr.AudioFile(BytesIO(wav_bytes)) as source:
             audio = r.record(source)
-        text = r.recognize_google(audio, language=language)  # anahtarsız
+        text = r.recognize_google(audio, language=language)  # no API key required
         return (text or "").strip()
     except Exception:
         return ""
 
 # =============================
-# SIMPLE HTML MIC (visual only; optional)
+# OPTIONAL VISUAL MIC (no return)
 # =============================
 def voice_input_visual_only():
     components.html(
         """
         <div style="border:3px solid #10b981;border-radius:14px;padding:16px;background:#ecfeff">
           <b>Voice Input (visual demo)</b><br>
-          This microphone is visual-only. Use the big button below to record.
+          This microphone is visual-only. Use the press & hold button below to record.
         </div>
         """,
         height=120
@@ -350,6 +351,38 @@ def show_avatar(photo_path: str, speaking: bool, placeholder=None):
                 "<div style='text-align:center;padding:8px;border-radius:10px;background:#eef2ff;color:#334155;'>Listening</div>",
                 unsafe_allow_html=True
             )
+
+# =============================
+# PERSISTENT RECORDER (stable key, NO rerun)
+# =============================
+def persistent_recorder(language: str = "en-US") -> Optional[str]:
+    """
+    Keeps the mic button always visible using a stable key.
+    Performs STT on the recorded audio and returns transcript (no rerun here).
+    """
+    if not _RECORDER_OK:
+        st.error("audio-recorder-streamlit is not available. Add it to requirements.txt or use Text mode.")
+        voice_input_visual_only()
+        return None
+
+    rec_container = st.container(border=True)
+    with rec_container:
+        st.markdown("#### 🎙️ Press & hold to record")
+        audio_bytes = audio_recorder(
+            text="🎙️ Press & hold to record",
+            pause_threshold=2.0,
+            sample_rate=16000,
+            key=st.session_state.recorder_key  # 🔑 stable key
+        )
+
+    if audio_bytes:
+        st.audio(audio_bytes, format="audio/wav")
+        text = transcribe_wav_bytes(audio_bytes, language=language)
+        if text:
+            st.success(f"Transcript: {text}")
+            return text.strip()
+
+    return None
 
 # =============================
 # REGISTRATION
@@ -631,28 +664,14 @@ def page_interview():
             send = st.button("Send", type="primary")
         if send and (user_text or "").strip():
             handle_turn(user_text.strip())
-            st.rerun()
+            st.rerun()  # rerun is OK for Text mode
     else:
-        st.info("Press the mic to record. Release to stop. The transcript will be sent automatically.")
-        transcript = None
-
-        if _RECORDER_OK:
-            audio_bytes = audio_recorder(text="🎙️ Press & hold to record", pause_threshold=2.0)
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav")
-                # Dil: "en-US" veya "tr-TR"
-                transcript = transcribe_wav_bytes(audio_bytes, language="en-US")
-                if transcript:
-                    st.success(f"Transcript: {transcript}")
-        else:
-            st.error("audio-recorder-streamlit not available. Add it to requirements.txt or use Text mode.")
-            voice_input_visual_only()
-
-        if transcript:
-            if transcript != st.session_state.get("pending_voice_input", ""):
-                st.session_state.pending_voice_input = transcript
-                handle_turn(transcript)
-                st.rerun()
+        st.info("Press & hold the mic to record. Release to stop. The transcript will be sent automatically.")
+        # 🔁 Always visible mic with a stable key. NO rerun here.
+        transcript = persistent_recorder(language="en-US")  # or "tr-TR"
+        if transcript and transcript != st.session_state.get("pending_voice_input", ""):
+            st.session_state.pending_voice_input = transcript
+            handle_turn(transcript)   # ⛔ NO st.rerun() in voice branch
 
     st.markdown("---")
     c1, c2 = st.columns(2)
