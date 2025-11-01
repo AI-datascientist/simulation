@@ -9,6 +9,11 @@ from typing import List, Dict, Any, Tuple, Optional
 import streamlit as st
 from PIL import Image
 from difflib import SequenceMatcher
+try:
+    from streamlit_browser_speech import speech_to_text
+    _BROWSER_SPEECH_OK = True
+except Exception:
+    _BROWSER_SPEECH_OK = False
 
 # Optional deps (gracefully degrade)
 try:
@@ -231,77 +236,6 @@ def speak_browser(text: str):
     )
     return comp
 
-def voice_input_browser(label="Press Start and speak"):
-    """Capture one-shot STT with Web Speech API; returns transcript or ''."""
-    html = """
-    <div style="padding:8px;border:1px solid #ddd;border-radius:10px;background:#fff;">
-      <button id="startBtn">🎙️ Start</button>
-      <button id="stopBtn" disabled>⏹️ Stop</button>
-      <span id="status" style="margin-left:8px;color:#555;">Idle</span>
-      <div id="out" style="margin-top:8px;font-weight:600;"></div>
-    </div>
-    <script>
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn  = document.getElementById('stopBtn');
-    const statusEl = document.getElementById('status');
-    const outEl    = document.getElementById('out');
-
-    let rec=null; let finalText = "";
-
-    function isSupported(){
-      return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
-    }
-
-    function createRec(){
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const r = new SR();
-      r.lang = 'en-US';
-      r.interimResults = true;
-      r.maxAlternatives = 1;
-      r.onstart = ()=>{{ statusEl.textContent='Listening...'; }};
-      r.onresult = (e)=>{
-        let t = "";
-        for (let i= e.resultIndex;i<e.results.length;i++){ t += e.results[i][0].transcript; }
-        outEl.textContent = t;
-        finalText = t;
-      };
-      r.onend = ()=>{{ statusEl.textContent='Stopped'; startBtn.disabled=false; stopBtn.disabled=true; }};
-      r.onerror = ()=>{{ statusEl.textContent='Error'; startBtn.disabled=false; stopBtn.disabled=true; }};
-      return r;
-    }
-
-    if(!isSupported()){
-      statusEl.textContent = 'Browser STT not supported.';
-      startBtn.disabled = true;
-    }
-
-    startBtn.onclick = ()=>{
-      finalText = ""; outEl.textContent = "";
-      if(!rec) rec = createRec();
-      startBtn.disabled = true; stopBtn.disabled = false;
-      rec.start();
-    };
-    stopBtn.onclick = ()=>{
-      if(rec) rec.stop();
-    };
-
-    // send transcript to Streamlit on stop
-    const streamlitSend = (t)=>{ window.parent.postMessage({type:'streamlit:componentReady', value:true}, '*');
-                                 window.parent.postMessage({type:'streamlit:setComponentValue', value:t}, '*'); };
-
-    window.addEventListener('message', (event)=>{
-      // ignore
-    });
-
-    // poll for finalText after end
-    setInterval(()=>{ if(finalText){ streamlitSend(finalText); finalText=""; }}, 600);
-    </script>
-    """
-    val = st.components.v1.html(html, height=130)
-    # Component returns via postMessage; Streamlit picks it up as value
-    # But in this lightweight embed, we read it using st.session_state
-    # Streamlit’s low-level component glue auto-updates return_value
-    return val
 
 # -----------------------------
 # AVATAR (talk indicator)
@@ -567,12 +501,18 @@ def page_interview():
             st.rerun()
     else:
         st.caption("Use the browser microphone (Chrome recommended).")
-        transcript = voice_input_browser()
-        # When transcript is delivered, it appears as the component's return value.
-        # Streamlit sets it into a hidden widget state; we read it via a session key.
-        # Easiest: show a small 'Use Transcript' button
-        val = st.session_state.get("_component_value")  # Not reliable in all builds; add a text_input as pickup:
-        recent = st.text_input("Transcript (auto-filled when ready):", value=st.session_state.get("last_transcript",""))
+        transcript = voice_input_browser(lang="en-US")
+    
+        # Automatic send after speech stops
+        if transcript:
+            handle_turn(transcript)
+            st.rerun()
+    
+        # Optional manual debug field (can be removed)
+        st.text_input("Transcript (auto-filled when ready):", 
+                      value=transcript, 
+                      key="last_transcript")
+
         colv1, colv2 = st.columns([5,1])
         with colv1:
             manual = st.text_input("Or edit and send:", key="manual_voice_send")
@@ -673,3 +613,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
