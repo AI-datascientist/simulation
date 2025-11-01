@@ -119,13 +119,13 @@ SCZ_PERSONA = {
 # SIMPLE STANDARDIZED QA DB (demo)
 # -----------------------------
 ALI_QA_DATABASE = [
-    {"q": "How are you feeling today", "a": "I still feel like I’m in a dark hole. Nothing seems to help.", "part": "Part 1"},
-    {"q": "Do you have thoughts of harming yourself", "a": "I’ve had those thoughts… but I don’t want to go into details.", "part": "Part 1"},
-    {"q": "How is your sleep", "a": "I wake up around 3 AM and can’t go back to sleep.", "part": "Part 1"},
+    {"q": "How are you feeling today", "a": "I still feel like I'm in a dark hole. Nothing seems to help.", "part": "Part 1"},
+    {"q": "Do you have thoughts of harming yourself", "a": "I've had those thoughts… but I don't want to go into details.", "part": "Part 1"},
+    {"q": "How is your sleep", "a": "I wake up around 3 AM and can't go back to sleep.", "part": "Part 1"},
 ]
 FERDI_QA_DATABASE = [
     {"q": "Why are you here", "a": "My mother brought me. She thinks I need help.", "part": "Part 1"},
-    {"q": "Do you hear voices", "a": "Sometimes… but they’re quieter when I stay calm.", "part": "Part 2"},
+    {"q": "Do you hear voices", "a": "Sometimes… but they're quieter when I stay calm.", "part": "Part 2"},
 ]
 
 # -----------------------------
@@ -144,6 +144,7 @@ def ensure_state_defaults():
     ss.setdefault("enable_tts", True)
     ss.setdefault("voice_output_target", "Browser (SpeechSynthesis)")
     ss.setdefault("GOOGLE_API_KEY_UI", "")
+    ss.setdefault("voice_transcript_buffer", "")
 
 ensure_state_defaults()
 
@@ -175,6 +176,16 @@ def qa_lookup(user_q: Any, persona_name: str, part: str) -> Optional[str]:
     if best and best_s >= 0.70:
         return best.get("a", "")
     return None
+
+def get_image_base64(image_path: str) -> str:
+    """Convert image to base64 for embedding in HTML"""
+    if not os.path.exists(image_path):
+        return ""
+    try:
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
 
 # -----------------------------
 # GEMINI
@@ -217,7 +228,7 @@ def llm_reply(persona: Dict, part: str, user_text: str) -> str:
         return "I'm having trouble responding right now."
     sys_prompt = build_system_prompt(persona, part)
     try:
-        model = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=sys_prompt)
+        model = genai.GenerativeModel(model_name="gemini-2.0-flash-exp", system_instruction=sys_prompt)
         r = model.generate_content(user_text)
         text = (getattr(r, "text", None) or "").strip()
         text = re.sub(r"\[.*?\]", "", text)  # remove bracketed meta
@@ -237,7 +248,7 @@ def speak_browser(text: str):
         const text = `{escaped}`;
         try {{
             const u = new SpeechSynthesisUtterance(text);
-            u.rate = 1.0;
+            u.rate = 0.9;
             u.pitch = 1.0;
             u.lang = 'en-US';
             window.speechSynthesis.cancel();
@@ -249,28 +260,53 @@ def speak_browser(text: str):
     )
 
 # -----------------------------
-# BROWSER STT (UI-ONLY)
+# BROWSER STT (IMPROVED UI)
 # -----------------------------
 def voice_input_browser_ui():
     """
-    Draw a simple Web Speech UI inside an iframe.
-    Due to iframe permission limits on some hosts (e.g., HF Spaces),
-    we DO NOT try to read a return value programmatically.
-    User will copy/paste the transcript manually into a text_input.
+    Improved Web Speech UI with better instructions and visual feedback.
+    User speaks, copies transcript, and pastes into text input below.
     """
     html = """
-    <div style="padding:8px;border:1px solid #ddd;border-radius:10px;background:#fff;">
-      <button id="startBtn">🎙️ Start</button>
-      <button id="stopBtn" disabled>⏹️ Stop</button>
-      <span id="status" style="margin-left:8px;color:#555;">Idle</span>
-      <div id="out" style="margin-top:8px;font-weight:600;"></div>
+    <div style="padding:16px;border:2px solid #3b82f6;border-radius:12px;background:#eff6ff;">
+      <div style="margin-bottom:12px;">
+        <h4 style="margin:0 0 8px 0;color:#1e40af;">Voice Recording Instructions:</h4>
+        <ol style="margin:0;padding-left:20px;color:#1e3a8a;line-height:1.6;">
+          <li>Click <strong>Start Recording</strong> button</li>
+          <li>Allow microphone access if prompted by browser</li>
+          <li>Speak your question clearly</li>
+          <li>Click <strong>Stop Recording</strong> when done</li>
+          <li>Copy the transcript text that appears below</li>
+          <li>Paste it into the text box and click <strong>Send Voice</strong></li>
+        </ol>
+      </div>
+      
+      <div style="text-align:center;margin-bottom:12px;">
+        <button id="startBtn" style="padding:10px 24px;font-size:16px;background:#10b981;color:white;border:none;border-radius:8px;cursor:pointer;margin-right:8px;">
+          Start Recording
+        </button>
+        <button id="stopBtn" disabled style="padding:10px 24px;font-size:16px;background:#ef4444;color:white;border:none;border-radius:8px;cursor:pointer;">
+          Stop Recording
+        </button>
+      </div>
+      
+      <div style="text-align:center;margin-bottom:12px;">
+        <span id="status" style="padding:8px 16px;background:#fff;border-radius:8px;color:#1e40af;font-weight:600;display:inline-block;">Ready to record</span>
+      </div>
+      
+      <div style="background:#fff;border:2px solid #3b82f6;border-radius:8px;padding:12px;min-height:60px;">
+        <div style="color:#64748b;font-size:13px;margin-bottom:4px;">Transcript (copy this text):</div>
+        <div id="out" style="font-weight:600;color:#1e40af;font-size:15px;min-height:40px;"></div>
+      </div>
     </div>
+    
     <script>
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
     const statusEl = document.getElementById('status');
     const outEl    = document.getElementById('out');
-    let rec=null; let finalText = "";
+    let rec=null; 
+    let finalText = "";
 
     function isSupported(){
       return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
@@ -281,36 +317,77 @@ def voice_input_browser_ui():
       const r = new SR();
       r.lang = 'en-US';
       r.interimResults = true;
+      r.continuous = false;
       r.maxAlternatives = 1;
-      r.onstart = ()=>{ statusEl.textContent='🎙️ Listening...'; };
+      
+      r.onstart = ()=>{ 
+        statusEl.textContent='Recording... Speak now';
+        statusEl.style.background='#fef3c7';
+        statusEl.style.color='#92400e';
+      };
+      
       r.onresult = (e)=>{
         let t = "";
-        for (let i= e.resultIndex;i<e.results.length;i++){ t += e.results[i][0].transcript; }
+        for (let i=0; i<e.results.length; i++){ 
+          t += e.results[i][0].transcript; 
+        }
         outEl.textContent = t;
         finalText = t;
       };
-      r.onend = ()=>{ statusEl.textContent='Stopped'; startBtn.disabled=false; stopBtn.disabled=true; };
-      r.onerror = ()=>{ statusEl.textContent='Error (browser blocked or unsupported)'; startBtn.disabled=false; stopBtn.disabled=true; };
+      
+      r.onend = ()=>{ 
+        statusEl.textContent='Recording stopped. Copy the transcript above.';
+        statusEl.style.background='#dcfce7';
+        statusEl.style.color='#166534';
+        startBtn.disabled=false; 
+        stopBtn.disabled=true; 
+      };
+      
+      r.onerror = (e)=>{ 
+        statusEl.textContent='Error: ' + e.error + ' (Check browser permissions)';
+        statusEl.style.background='#fee2e2';
+        statusEl.style.color='#991b1b';
+        startBtn.disabled=false; 
+        stopBtn.disabled=true; 
+      };
+      
       return r;
     }
 
     if(!isSupported()){
-      statusEl.textContent = 'Browser STT not supported.';
+      statusEl.textContent = 'Browser Speech Recognition not supported. Please use Chrome.';
+      statusEl.style.background='#fee2e2';
+      statusEl.style.color='#991b1b';
       startBtn.disabled = true;
     }
 
     startBtn.onclick = ()=>{
-      finalText = ""; outEl.textContent = "";
+      finalText = ""; 
+      outEl.textContent = "";
       if(!rec) rec = createRec();
-      startBtn.disabled = true; stopBtn.disabled = false;
-      rec.start();
+      startBtn.disabled = true; 
+      stopBtn.disabled = false;
+      try {
+        rec.start();
+      } catch(e) {
+        statusEl.textContent = 'Error starting: ' + e.message;
+        statusEl.style.background='#fee2e2';
+        statusEl.style.color='#991b1b';
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
     };
+    
     stopBtn.onclick = ()=>{
-      if(rec) rec.stop();
+      if(rec) {
+        try {
+          rec.stop();
+        } catch(e) {}
+      }
     };
     </script>
     """
-    components.html(html, height=160)
+    components.html(html, height=350)
 
 # -----------------------------
 # AVATAR (talk indicator)
@@ -327,14 +404,14 @@ def show_avatar(photo_path: str, speaking: bool, placeholder=None):
                 """
                 <div style='text-align:center;padding:8px;border-radius:10px;
                     background:linear-gradient(90deg,#10b981,#059669);color:#fff;
-                    font-weight:600;animation:pulse 1s infinite'>🗣️ Speaking...</div>
+                    font-weight:600;animation:pulse 1s infinite'>Speaking...</div>
                 <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:.75}}</style>
                 """,
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                "<div style='text-align:center;padding:8px;border-radius:10px;background:#eef2ff;color:#334155;'>👤 Listening</div>",
+                "<div style='text-align:center;padding:8px;border-radius:10px;background:#eef2ff;color:#334155;'>Listening</div>",
                 unsafe_allow_html=True
             )
 
@@ -559,13 +636,64 @@ def page_interview():
         unsafe_allow_html=True
     )
 
-    # Show conversation
+    # Show conversation with avatars
+    st.markdown("### Conversation History")
+    
+    # Get patient avatar base64
+    patient_photo = persona.get("photo", "")
+    patient_avatar_b64 = get_image_base64(patient_photo)
+    
+    # Get student avatar base64
+    student_photo = st.session_state.user.get("photo_path", "")
+    student_avatar_b64 = get_image_base64(student_photo)
+    
     for role, msg, ts, source in st.session_state.conversation:
         if role == "Student":
-            st.markdown(f"<div class='chat-bubble'><b>You</b><br>{msg}<br><span style='color:#6b7280;font-size:12px'>{ts}</span></div>", unsafe_allow_html=True)
+            # Student message with avatar
+            col1, col2 = st.columns([1, 9])
+            with col1:
+                if student_avatar_b64:
+                    st.markdown(
+                        f'<img src="data:image/jpeg;base64,{student_avatar_b64}" style="width:100%;border-radius:50%;border:2px solid #3b82f6;">',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown("👤")
+            with col2:
+                st.markdown(
+                    f"""<div style='background:#e0f2fe;padding:12px;border-radius:12px;border-left:4px solid #0284c7;'>
+                    <div style='font-weight:600;color:#0c4a6e;margin-bottom:4px;'>You</div>
+                    <div style='color:#075985;'>{msg}</div>
+                    <div style='color:#64748b;font-size:11px;margin-top:4px;'>{ts}</div>
+                    </div>""",
+                    unsafe_allow_html=True
+                )
         else:
-            badge = "📚 STANDARDIZED" if source == "db" else "🤖 AI"
-            st.markdown(f"<div class='chat-bubble'><b>{persona['name']}</b> <span style='font-size:11px;background:#eef2ff;border:1px solid #cbd5e1;padding:2px 6px;border-radius:6px;margin-left:6px'>{badge}</span><br>{msg}<br><span style='color:#6b7280;font-size:12px'>{ts}</span></div>", unsafe_allow_html=True)
+            # Patient message with avatar
+            col1, col2 = st.columns([1, 9])
+            with col1:
+                if patient_avatar_b64:
+                    st.markdown(
+                        f'<img src="data:image/jpeg;base64,{patient_avatar_b64}" style="width:100%;border-radius:50%;border:2px solid #8b5cf6;">',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown("👤")
+            with col2:
+                badge = "STANDARDIZED" if source == "db" else "AI"
+                badge_color = "#10b981" if source == "db" else "#8b5cf6"
+                st.markdown(
+                    f"""<div style='background:#f3e8ff;padding:12px;border-radius:12px;border-left:4px solid #a855f7;'>
+                    <div style='font-weight:600;color:#6b21a8;margin-bottom:4px;'>
+                        {persona['name']} 
+                        <span style='font-size:10px;background:{badge_color};color:white;padding:2px 8px;border-radius:10px;margin-left:8px;font-weight:500;'>{badge}</span>
+                    </div>
+                    <div style='color:#7c3aed;'>{msg}</div>
+                    <div style='color:#64748b;font-size:11px;margin-top:4px;'>{ts}</div>
+                    </div>""",
+                    unsafe_allow_html=True
+                )
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.subheader("Your Input")
@@ -582,18 +710,29 @@ def page_interview():
             handle_turn(user_text.strip())
             st.rerun()
     else:
-        st.caption("Use the browser microphone (Chrome recommended). Speak; copy the transcript from the box; then press Send Voice.")
-        # Draw STT UI (no programmatic return)
+        st.info("Note: Voice recording works best in Chrome browser. Allow microphone access when prompted.")
+        
+        # Draw improved STT UI
         voice_input_browser_ui()
 
-        # Manual paste/edit area
+        # Manual paste/edit area with clearer instructions
+        st.markdown("#### Paste Transcript Here:")
         colv1, colv2 = st.columns([5,1])
         with colv1:
-            transcript_buf = st.text_input("Transcript (paste or type here):", key="voice_buf")
+            transcript_buf = st.text_area(
+                "After recording, copy the transcript from above and paste it here:",
+                key="voice_buf",
+                height=100,
+                placeholder="Paste your transcript here..."
+            )
         with colv2:
+            st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
             sendv = st.button("Send Voice", type="primary", use_container_width=True)
+        
         if sendv and (transcript_buf or "").strip():
             handle_turn(transcript_buf.strip())
+            # Clear the buffer
+            st.session_state.voice_transcript_buffer = ""
             st.rerun()
 
     st.markdown("---")
@@ -618,7 +757,7 @@ def handle_turn(user_input: str):
     photo = persona.get("photo", "")
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
-    time.sleep(0.1)
+    time.sleep(0.3)
 
     # DB first
     ans = qa_lookup(user_input, persona["name"], part)
@@ -626,12 +765,16 @@ def handle_turn(user_input: str):
     if not ans:
         ans = llm_reply(persona, part, user_input)
 
-    # Speak (browser)
+    # Show avatar as speaking
     if os.path.exists(photo):
         show_avatar(photo, speaking=True, placeholder=st.session_state.avatar_placeholder)
+    
+    # Speak (browser)
     if st.session_state.enable_tts and st.session_state.voice_output_target.startswith("Browser"):
         speak_browser(ans)
-    time.sleep(0.1)
+        time.sleep(1.5)  # Give time for speech to complete
+    
+    # Back to listening
     if os.path.exists(photo):
         show_avatar(photo, speaking=False, placeholder=st.session_state.avatar_placeholder)
 
